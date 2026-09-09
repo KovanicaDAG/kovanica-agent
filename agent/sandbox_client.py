@@ -12,7 +12,8 @@ graph.py's run_cargo_command should delegate here, e.g.::
     return run_cargo(command, args, repo_path)
 
 `repo_path` is interpreted *in the sidecar's filesystem* — it must be the path
-of the shared read-only repo mount as the sidecar sees it (default /repos).
+of the shared read-only repo mount as the sidecar sees it (default
+/repos/kovanica-protocol).
 """
 
 import os
@@ -23,10 +24,11 @@ SANDBOX_RUNNER_URL = os.environ.get(
     "SANDBOX_RUNNER_URL", "http://sandbox-runner:8081"
 ).rstrip("/")
 RUN_ENDPOINT = f"{SANDBOX_RUNNER_URL}/run"
-DEFAULT_REPO_PATH = os.environ.get("REPOS_PATH", "/repos")
+DEFAULT_REPO_PATH = os.environ.get("REPOS_PATH", "/repos/kovanica-protocol")
 DEFAULT_TIMEOUT_S = 180
 # The sidecar caps at MAX_TIMEOUT_S; keep a little headroom for the HTTP call.
 HTTP_TIMEOUT_S = 600
+RUNNER_TOKEN = os.environ.get("SANDBOX_RUNNER_TOKEN", "").strip()
 
 
 def run_cargo(
@@ -47,8 +49,13 @@ def run_cargo(
         "repo_path": repo_path,
         "timeout_s": timeout_s,
     }
+    headers = {}
+    if RUNNER_TOKEN:
+        headers["Authorization"] = f"Bearer {RUNNER_TOKEN}"
     try:
-        resp = requests.post(RUN_ENDPOINT, json=payload, timeout=HTTP_TIMEOUT_S)
+        resp = requests.post(
+            RUN_ENDPOINT, json=payload, headers=headers, timeout=HTTP_TIMEOUT_S
+        )
     except requests.exceptions.ConnectionError as e:
         return (
             f"ERROR: cannot reach sandbox-runner at {SANDBOX_RUNNER_URL} "

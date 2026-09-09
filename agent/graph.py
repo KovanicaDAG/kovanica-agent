@@ -34,16 +34,43 @@ try:  # langgraph.config via contextvar; absent in some old runtimes
 except Exception:  # pragma: no cover - defensive fallback
     _get_config = None
 
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://vllm:8000/v1")
-# Model name passed to the OpenAI-compatible server. Default targets the
-# GPU vLLM deployment (Qwen 32B AWQ). CPU/local deployments should set
-# AGENT_MODEL to the served model name (e.g. Ollama "qwen2.5-coder:3b").
-AGENT_MODEL = os.environ.get(
-    "AGENT_MODEL", "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ"
-)
-QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "kovanica-sandbox:latest")
-REPOS_PATH = os.environ.get("REPOS_PATH", "/repos")
+
+def _env(name: str, default: str = "") -> str:
+    return (os.environ.get(name, default) or default).strip()
+
+
+def _resolve_llm() -> ChatOpenAI:
+    """Pick the OpenAI-compatible endpoint.
+
+    Precedence:
+      1. LLM_BASE_URL (+ LLM_API_KEY / XAI_API_KEY / OPENAI_API_KEY)
+      2. VLLM_BASE_URL (compose: vLLM on GPU, Ollama on CPU)
+    """
+    explicit_base = _env("LLM_BASE_URL")
+    vllm_base = _env("VLLM_BASE_URL", "http://vllm:8000/v1")
+    key = _env("LLM_API_KEY") or _env("XAI_API_KEY") or _env("OPENAI_API_KEY") or "not-needed"
+    if explicit_base:
+        base = explicit_base
+        default_model = "grok-4" if "x.ai" in explicit_base else "qwen2.5-coder:3b"
+    else:
+        base = vllm_base
+        default_model = "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ"
+        if ":11434" in vllm_base or "ollama" in vllm_base.lower():
+            default_model = "qwen2.5-coder:3b"
+    model = _env("AGENT_MODEL") or default_model
+    return ChatOpenAI(
+        base_url=base,
+        api_key=key,
+        model=model,
+        temperature=0.1,
+        timeout=120,
+        max_retries=1,
+    )
+
+
+QDRANT_URL = _env("QDRANT_URL", "http://qdrant:6333")
+SANDBOX_IMAGE = _env("SANDBOX_IMAGE", "kovanica-sandbox:latest")
+REPOS_PATH = _env("REPOS_PATH", "/repos/kovanica-protocol")
 
 ALLOWED_CARGO_COMMANDS = {"check", "test", "clippy", "build"}
 CARGO_TIMEOUT_SECONDS = 180
@@ -74,11 +101,13 @@ def search_codebase(query: str) -> str:
 @tool
 def read_file(path: str, start_line: int = 1, end_line: Optional[int] = None) -> str:
     """Read a slice of a file from the read-only repo mount. Path is relative
-    to the repo root, e.g. 'consensus/src/ghostdag.rs'.
+    to the repo root, e.g. 'crates/kovanica-dag/src/ghostdag.rs'.
     """
     full_path = os.path.join(REPOS_PATH, path.lstrip("/"))
     if not os.path.abspath(full_path).startswith(os.path.abspath(REPOS_PATH)):
         return "ERROR: path escapes repo root"
+    if not os.path.isfile(full_path):
+        return f"ERROR: file not found: {path}"
     with open(full_path, "r", errors="replace") as f:
         lines = f.readlines()
     end_line = end_line or len(lines)
@@ -164,7 +193,7 @@ def query_node_api(endpoint: str) -> str:
         return f"ERROR: request to {url} timed out after 8s"
     except requests.ConnectionError:
         return f"ERROR: could not connect to {url}"
-    except requests.HTTPError as exc:
+    except requests.HTTPError:
         return f"ERROR: HTTP {resp.status_code} from {url}: {resp.text[:1000]}"
     except Exception as exc:
         return f"ERROR: {exc}"
@@ -192,14 +221,12 @@ USER_TOOLS = [search_codebase, query_node_api, explain_concept]
 # LLM
 # ---------------------------------------------------------------------------
 
-llm = ChatOpenAI(
-    base_url=VLLM_BASE_URL,
-    api_key="not-needed",  # vLLM's OpenAI-compatible server ignores this
-    model=AGENT_MODEL,
-    temperature=0.1,
-)
+llm = _resolve_llm()
 
-with open(os.path.join(os.path.dirname(__file__), "..", "SYSTEM_PROMPT.md")) as f:
+_prompt_path = os.path.join(os.path.dirname(__file__), "..", "SYSTEM_PROMPT.md")
+if not os.path.isfile(_prompt_path):
+    _prompt_path = "/SYSTEM_PROMPT.md"
+with open(_prompt_path) as f:
     SYSTEM_PROMPT = f.read()
 
 
@@ -221,6 +248,18 @@ def agent_node(state: AgentState) -> AgentState:
     return {"messages": [response]}
 
 
+def tools_node(state: AgentState) -> AgentState:
+    """Execute tool calls with the role-appropriate tool set.
+
+    A single ToolNode(DEV_TOOLS) would let a user-role model that hallucinated
+    a privileged tool name actually run it. Bind the node to USER_TOOLS when
+    role != dev so cargo / read_file / git_diff_suggest are unreachable.
+    """
+    from langgraph.prebuilt import ToolNode
+    tools = DEV_TOOLS if state.get("role") == "dev" else USER_TOOLS
+    return ToolNode(tools).invoke(state)
+
+
 def human_gate(state: AgentState) -> AgentState:
     """Reached only when the agent called git_diff_suggest. Graph execution
     stops here (see interrupt_before in build_graph) until main.py's
@@ -239,7 +278,7 @@ def should_continue(state: AgentState) -> str:
     tool_calls = getattr(last, "tool_calls", None)
     if not tool_calls:
         return END
-    if any(tc["name"] == "git_diff_suggest" for tc in tool_calls):
+    if state.get("role") == "dev" and any(tc["name"] == "git_diff_suggest" for tc in tool_calls):
         return "human_gate"
     return "tools"
 
@@ -249,12 +288,10 @@ def should_continue(state: AgentState) -> str:
 # ---------------------------------------------------------------------------
 
 def build_graph():
-    from langgraph.prebuilt import ToolNode
-
     graph = StateGraph(AgentState)
     graph.add_node("router", router)
     graph.add_node("agent", agent_node)
-    graph.add_node("tools", ToolNode(DEV_TOOLS))
+    graph.add_node("tools", tools_node)
     graph.add_node("human_gate", human_gate)
 
     graph.set_entry_point("router")

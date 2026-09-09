@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kovi — Kovanica engineering agent</title>
+  <meta name="description" content="Kovi, Product of Kovanica. Ask about GHOSTDAG, the KVNC testnet, and the protocol codebase." />
+  <meta name="theme-color" content="#09090b" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #09090b;
+      --surface: #121214;
+      --surface-2: #1a1a1e;
+      --fg: #f2f1ee;
+      --muted: #9a9aa3;
+      --subtle: #6b6b74;
+      --border: #2a2a30;
+      --blue: #8aa0b4;
+      --ok: #7d9a7a;
+      --danger: #c45c4a;
+      --gold: #F2A900;
+      --font-display: "Fraunces", ui-serif, Georgia, serif;
+      --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+      --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-sans); }
+    body { display: flex; flex-direction: column; min-height: 100dvh; }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      height: 56px; padding: 0 16px; border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--bg) 95%, transparent);
+      position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px);
+    }
+    .brand { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+    .brand h1 {
+      margin: 0; font-family: var(--font-display); font-style: italic;
+      font-weight: 600; font-size: 22px; letter-spacing: -0.02em;
+    }
+    .brand .tag {
+      font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.22em;
+      text-transform: uppercase; color: var(--blue); white-space: nowrap;
+    }
+    .status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--subtle); }
+    .dot.ok { background: var(--ok); }
+    .dot.bad { background: var(--danger); }
+    main {
+      flex: 1; display: flex; flex-direction: column;
+      width: 100%; max-width: 760px; margin: 0 auto; padding: 20px 16px 12px;
+    }
+    #log { flex: 1; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; padding-bottom: 8px; }
+    .msg { max-width: 92%; padding: 12px 14px; border-radius: 12px; line-height: 1.55; font-size: 15px; white-space: pre-wrap; word-break: break-word; }
+    .msg.user { align-self: flex-end; background: var(--surface-2); border: 1px solid var(--border); }
+    .msg.agent { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); }
+    .msg.system { align-self: center; color: var(--subtle); font-size: 13px; background: transparent; border: 0; padding: 4px; }
+    .msg.agent code, .msg.user code {
+      font-family: var(--font-mono); font-size: 13px; background: #00000055;
+      padding: 1px 5px; border-radius: 4px;
+    }
+    .welcome { margin: 24px 0 8px; text-align: center; }
+    .welcome h2 {
+      font-family: var(--font-display); font-style: italic; font-weight: 600;
+      font-size: 40px; margin: 0; letter-spacing: -0.03em;
+    }
+    .welcome p { color: var(--muted); max-width: 420px; margin: 10px auto 0; line-height: 1.5; font-size: 15px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 20px; }
+    .chip {
+      border: 1px solid var(--border); background: var(--surface); color: var(--fg);
+      border-radius: 999px; padding: 8px 14px; font-size: 13px;
+    }
+    .chip:hover { background: var(--surface-2); }
+    form.composer {
+      display: flex; gap: 8px; align-items: flex-end;
+      padding: 10px 0 16px; position: sticky; bottom: 0; background: var(--bg);
+    }
+    textarea {
+      flex: 1; resize: none; min-height: 48px; max-height: 160px;
+      background: var(--surface); color: var(--fg); border: 1px solid var(--border);
+      border-radius: 12px; padding: 12px 14px; font: inherit; line-height: 1.4;
+    }
+    textarea:focus { outline: 2px solid color-mix(in srgb, var(--blue) 50%, transparent); outline-offset: 1px; }
+    button.send {
+      height: 48px; padding: 0 18px; border: 0; border-radius: 12px;
+      background: var(--fg); color: var(--bg); font-weight: 600; font-size: 14px;
+    }
+    button.send:disabled { opacity: 0.45; }
+    .confirm {
+      display: flex; gap: 8px; margin-top: 10px;
+    }
+    .confirm button {
+      height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--surface-2); color: var(--fg); font-size: 13px;
+    }
+    .confirm .approve { background: var(--ok); color: #0a0a0b; border: 0; font-weight: 600; }
+    details.settings { color: var(--subtle); font-size: 12px; }
+    details.settings summary { cursor: pointer; list-style: none; }
+    details.settings input {
+      margin-top: 8px; width: min(280px, 70vw); background: var(--surface);
+      border: 1px solid var(--border); color: var(--fg); border-radius: 8px;
+      padding: 8px 10px; font-family: var(--font-mono); font-size: 12px;
+    }
+    footer {
+      text-align: center; font-size: 12px; color: var(--subtle);
+      padding: 0 16px 18px;
+    }
+    .typing { color: var(--subtle); font-size: 13px; align-self: flex-start; padding: 4px 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <a class="brand" href="/" aria-label="Kovi home">
+      <h1>Kovi</h1>
+      <span class="tag">Product of Kovanica</span>
+    </a>
+    <div class="status" id="status"><span class="dot" id="dot"></span><span id="status-text">connecting</span></div>
+  </header>
+  <main>
+    <div id="log">
+      <div class="welcome" id="welcome">
+        <h2>Kovi</h2>
+        <p>The Kovanica engineering agent. Ask about GHOSTDAG, the testnet, KVNC, or the protocol crates.</p>
+        <div class="chips">
+          <button class="chip" type="button" data-q="What is GHOSTDAG, and how does Kovanica use it?">What is GHOSTDAG?</button>
+          <button class="chip" type="button" data-q="What is the current testnet head and height?">Testnet head</button>
+          <button class="chip" type="button" data-q="Explain k-cluster, blue set, and selected parent.">k-cluster & blue set</button>
+          <button class="chip" type="button" data-q="How do I run a kovanica-node and join kovanica-testnet?">Join the testnet</button>
+        </div>
+      </div>
+    </div>
+    <form class="composer" id="form">
+      <textarea id="input" rows="1" placeholder="Ask Kovi about the protocol…" autocomplete="off"></textarea>
+      <button class="send" id="send" type="submit">Send</button>
+    </form>
+  </main>
+  <footer>
+    <details class="settings">
+      <summary>Dev token (optional — required only to approve patches)</summary>
+      <input id="token" type="password" placeholder="Bearer token" autocomplete="off" />
+    </details>
+    <p style="margin:10px 0 0">Public answers are read-only. Repo writes stay human-gated.
+      <a href="https://kovanica.online">kovanica.online</a>
+      · <a href="https://explorer.kovanica.online">explorer</a>
+    </p>
+  </footer>
+  <script>
+    const logEl = document.getElementById("log");
+    const form = document.getElementById("form");
+    const input = document.getElementById("input");
+    const send = document.getElementById("send");
+    const tokenEl = document.getElementById("token");
+    const welcome = document.getElementById("welcome");
+    const sessionId = (() => {
+      const k = "kovi.session";
+      let id = localStorage.getItem(k);
+      if (!id) { id = crypto.randomUUID(); localStorage.setItem(k, id); }
+      return id;
+    })();
+    tokenEl.value = localStorage.getItem("kovi.token") || "";
+    tokenEl.addEventListener("change", () => localStorage.setItem("kovi.token", tokenEl.value.trim()));
+
+    function addMsg(role, text) {
+      const div = document.createElement("div");
+      div.className = "msg " + role;
+      div.innerHTML = format(text);
+      logEl.appendChild(div);
+      logEl.scrollTop = logEl.scrollHeight;
+      return div;
+    }
+    function format(text) {
+      const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&", "<": "<", ">": ">" }[c]));
+      let s = esc(text || "");
+      s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+      return s;
+    }
+    async function ping() {
+      try {
+        const r = await fetch("/healthz", { cache: "no-store" });
+        const ok = r.ok;
+        document.getElementById("dot").className = "dot " + (ok ? "ok" : "bad");
+        document.getElementById("status-text").textContent = ok ? "online" : "degraded";
+      } catch {
+        document.getElementById("dot").className = "dot bad";
+        document.getElementById("status-text").textContent = "offline";
+      }
+    }
+    ping();
+    setInterval(ping, 15000);
+
+    function headers() {
+      const h = { "Content-Type": "application/json" };
+      const t = tokenEl.value.trim();
+      if (t) h["Authorization"] = t.startsWith("Bearer ") ? t : "Bearer " + t;
+      return h;
+    }
+
+    let pending = false;
+    async function ask(message) {
+      if (!message || pending) return;
+      pending = true;
+      send.disabled = true;
+      if (welcome) welcome.remove();
+      addMsg("user", message);
+      const thinking = document.createElement("div");
+      thinking.className = "typing";
+      thinking.textContent = "Kovi is thinking…";
+      logEl.appendChild(thinking);
+      logEl.scrollTop = logEl.scrollHeight;
+      try {
+        const r = await fetch("/chat", {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({ session_id: sessionId, message }),
+        });
+        const data = await r.json().catch(() => ({}));
+        thinking.remove();
+        if (!r.ok) {
+          addMsg("agent", data.detail || data.error || ("HTTP " + r.status));
+          return;
+        }
+        if (data.status === "pending_confirmation") {
+          const box = addMsg("agent", (data.detail || "Proposed a repo change.") + "\n\n" + (data.messages || []).join("\n\n"));
+          const bar = document.createElement("div");
+          bar.className = "confirm";
+          bar.innerHTML = '<button type="button" class="approve">Approve draft PR</button><button type="button">Reject</button>';
+          box.appendChild(bar);
+          bar.querySelector(".approve").onclick = () => confirm(true);
+          bar.querySelector("button:last-child").onclick = () => confirm(false);
+        } else {
+          addMsg("agent", data.reply || JSON.stringify(data));
+        }
+      } catch (err) {
+        thinking.remove();
+        addMsg("agent", "Could not reach Kovi: " + err.message);
+      } finally {
+        pending = false;
+        send.disabled = false;
+        input.focus();
+      }
+    }
+
+    async function confirm(approve) {
+      addMsg("system", approve ? "Approving…" : "Rejecting…");
+      try {
+        const r = await fetch("/confirm", {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({ session_id: sessionId, approve }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          addMsg("agent", data.detail || ("HTTP " + r.status));
+          return;
+        }
+        const extra = data.pr_url ? "\nPR: " + data.pr_url : "";
+        addMsg("agent", (data.reply || data.detail || data.status) + extra);
+      } catch (err) {
+        addMsg("agent", "Confirm failed: " + err.message);
+      }
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const msg = input.value.trim();
+      input.value = "";
+      input.style.height = "auto";
+      ask(msg);
+    });
+    input.addEventListener("input", () => {
+      input.style.height = "auto";
+      input.style.height = Math.min(input.scrollHeight, 160) + "px";
+    });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        form.requestSubmit();
+      }
+    });
+    document.querySelectorAll(".chip").forEach((b) => {
+      b.addEventListener("click", () => ask(b.getAttribute("data-q")));
+    });
+  </script>
+</body>
+</html>

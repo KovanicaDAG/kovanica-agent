@@ -9,7 +9,7 @@ services:
       --max-model-len 32768
       --gpu-memory-utilization 0.90
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - vllm-cache:/root/.cache/huggingface
     deploy:
@@ -24,7 +24,7 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     ports:
-      - "6333:6333"
+      - "127.0.0.1:6333:6333"
     volumes:
       - qdrant-data:/qdrant/storage
     restart: unless-stopped
@@ -33,13 +33,23 @@ services:
     build:
       context: .
       dockerfile: agent/Dockerfile
+    env_file:
+      - path: .env
+        required: false
     environment:
       - VLLM_BASE_URL=http://vllm:8000/v1
       - QDRANT_URL=http://qdrant:6333
       - SANDBOX_IMAGE=kovanica-sandbox:latest
       - SANDBOX_RUNNER_URL=http://sandbox-runner:8081
-      - REPOS_PATH=/repos
+      - SANDBOX_RUNNER_TOKEN=${SANDBOX_RUNNER_TOKEN:-}
+      - REPOS_PATH=/repos/kovanica-protocol
       - AGENT_DB=/data/agent.sqlite3
+      - CORS_ORIGINS=${CORS_ORIGINS:-https://kovi.kovanica.online,https://kovanica.online,https://www.kovanica.online}
+      - KOVANICA_NODE_URL=${KOVANICA_NODE_URL:-https://explorer.kovanica.online}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - XAI_API_KEY=${XAI_API_KEY:-}
+      - AGENT_MODEL=${AGENT_MODEL:-}
       # Optional auth: set AUTH_JWKS_URL (+ ISSUER/AUDIENCE/DEV_ROLES) for
       # JWKS mode, or AUTH_DEV_TOKEN for dev-token mode. Unset = everyone is
       # 'user' (fail-closed for dev).
@@ -72,7 +82,7 @@ services:
       - qdrant
       - sandbox-runner
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     restart: unless-stopped
 
   # sandbox-runner is the ONLY service that mounts the Docker socket. It owns
@@ -84,9 +94,10 @@ services:
     build: ./sandbox/runner
     environment:
       - SANDBOX_IMAGE=kovanica-sandbox:latest
-      - REPOS_PATH=/repos
+      - REPOS_PATH=/repos/kovanica-protocol
       - SANDBOX_RUNNER_HOST=0.0.0.0
       - SANDBOX_RUNNER_PORT=8081
+      - SANDBOX_RUNNER_TOKEN=${SANDBOX_RUNNER_TOKEN:-}
     volumes:
       # The shared read-only repo mount, so the sidecar can bind it into each
       # sandbox container as /workspace:ro.
@@ -112,12 +123,13 @@ services:
     environment:
       - OPENAI_API_BASE_URL=http://vllm:8000/v1
     ports:
-      - "3000:8080"
+      - "127.0.0.1:3000:8080"
     volumes:
       - webui-data:/app/backend/data
     depends_on:
       - vllm
     restart: unless-stopped
+    profiles: ["operator"]
 
   # Not run as a persistent service. Build it once:
   #   docker compose --profile build-only build sandbox-image

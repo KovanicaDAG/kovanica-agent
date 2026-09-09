@@ -2,10 +2,8 @@ version: "3.9"
 
 # CPU-only override for hosts without an NVIDIA GPU (e.g. the VPS).
 # Usage:
-#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml \
-#     --profile build-only build sandbox-image
 #   docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d \
-#     qdrant sandbox-runner agent-api open-webui
+#     qdrant vllm sandbox-runner agent-api
 #
 # Replaces the vLLM service (needs a GPU) with Ollama running a small
 # coder model on CPU. Compose merges these overrides into the base file:
@@ -13,11 +11,14 @@ version: "3.9"
 # points it at Ollama's OpenAI-compatible /v1 on port 11434. Pull the
 # model first:
 #   docker compose -f docker-compose.yml -f docker-compose.cpu.yml \
-#     exec ollama ollama pull qwen2.5-coder:3b
-# then restart agent-api / open-webui so they pick it up.
+#     exec vllm ollama pull qwen2.5-coder:3b
+# then restart agent-api so it picks it up.
 #
 # AGENT_MODEL is set to the CPU model name; graph.py defaults the other
 # way to the GPU model so both topologies are coherent.
+#
+# Public surface is nginx → 127.0.0.1:13080 (kovi.kovanica.online).
+# Open WebUI is operator-only (`--profile operator`) on 127.0.0.1:13000.
 
 services:
   vllm:
@@ -25,9 +26,9 @@ services:
     command: ["serve"]
     # Base vllm publishes 8000:8000 (vLLM); Ollama serves OpenAI-compat on
     # 11434. The host already has something on 8000 (pm2 dashboard-api), so
-    # !reset the base ports entirely and publish only Ollama's.
+    # !reset the base ports entirely and publish only Ollama's, loopback-only.
     ports: !override
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollama-data:/root/.ollama
     environment:
@@ -41,12 +42,12 @@ services:
   agent-api:
     # Host 8080 is taken on this VPS by a live kovanica-node metrics
     # listener; publish the API on 13080 instead (nginx fronts it at
-    # kovanica.online/agent or a subdomain).
+    # kovi.kovanica.online).
     ports: !override
-      - "13080:8080"
+      - "127.0.0.1:13080:8080"
     environment:
       - VLLM_BASE_URL=http://vllm:11434/v1
-      - AGENT_MODEL=qwen2.5-coder:3b
+      - AGENT_MODEL=${AGENT_MODEL:-qwen2.5-coder:3b}
     depends_on:
       - qdrant
       - sandbox-runner
@@ -55,10 +56,10 @@ services:
 
   open-webui:
       # Host port 3000 is already taken on this VPS (claudia-s-store
-    # container). Publish the WebUI on 13000 instead (nginx will front it
-    # at kovac.kovanica.online / kovanica.online/agent).
+    # container). Publish the WebUI on 13000 instead — loopback only;
+    # not the public kovi surface.
     ports: !override
-      - "13000:8080"
+      - "127.0.0.1:13000:8080"
     environment:
       - OPENAI_API_BASE_URL=http://vllm:11434/v1
     depends_on:

@@ -528,8 +528,8 @@ def main() -> None:
         description="Index a repo into Qdrant for the Kovanica agent.",
     )
     parser.add_argument(
-        "--repo", default="/root/kovanica-protocol",
-        help="Path to the repo root (default: /root/kovanica-protocol)",
+        "--repo", default="/repos/kovanica-protocol",
+        help="Path to the repo root (default: /repos/kovanica-protocol)",
     )
     parser.add_argument(
         "--collection", default=DEFAULT_COLLECTION,

@@ -23,9 +23,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import docker
 
 SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "kovanica-sandbox:latest")
-REPOS_PATH = os.environ.get("REPOS_PATH", "/repos")
+REPOS_PATH = os.environ.get("REPOS_PATH", "/repos/kovanica-protocol")
 LISTEN_HOST = os.environ.get("SANDBOX_RUNNER_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("SANDBOX_RUNNER_PORT", "8081"))
+RUNNER_TOKEN = os.environ.get("SANDBOX_RUNNER_TOKEN", "").strip()
 
 ALLOWED_COMMANDS = {"check", "test", "clippy", "build"}
 DEFAULT_TIMEOUT_S = 180
@@ -71,13 +72,22 @@ def run_cargo(payload: dict) -> dict:
     if error:
         return {"status": "rejected", "body": error}
 
+    # Refuse to bind anything outside the shared repos mount.
+    abs_repo = os.path.abspath(repo_path)
+    abs_root = os.path.abspath(REPOS_PATH)
+    if abs_repo != abs_root and not abs_repo.startswith(abs_root + os.sep):
+        return {
+            "status": "rejected",
+            "body": f"REJECTED: repo_path {repo_path!r} is outside {REPOS_PATH}",
+        }
+
     container_name = f"kovanica-sandbox-{uuid.uuid4().hex[:8]}"
     try:
         result = _client.containers.run(
             image=SANDBOX_IMAGE,
             command=[command, *args],
             name=container_name,
-            volumes={os.path.abspath(repo_path): {"bind": "/workspace", "mode": "ro"}},
+            volumes={abs_repo: {"bind": "/workspace", "mode": "ro"}},
             network_disabled=True,
             mem_limit="2g",
             nano_cpus=int(2e9),       # 2 CPUs
@@ -97,9 +107,24 @@ def run_cargo(payload: dict) -> dict:
 
 
 class _Handler(BaseHTTPRequestHandler):
+    def _authorized(self) -> bool:
+        if not RUNNER_TOKEN:
+            return True
+        auth = self.headers.get("Authorization", "")
+        return auth == f"Bearer {RUNNER_TOKEN}"
+
+    def do_GET(self):  # noqa: N802 - stdlib handler signature
+        if self.path in ("/healthz", "/readyz"):
+            self._respond(200, {"status": "ok", "name": "sandbox-runner"})
+            return
+        self._respond(404, {"status": "error", "body": "not found"})
+
     def do_POST(self):  # noqa: N802 - stdlib handler signature
         if self.path != "/run":
             self._respond(404, {"status": "error", "body": "not found: use POST /run"})
+            return
+        if not self._authorized():
+            self._respond(401, {"status": "error", "body": "unauthorized"})
             return
 
         length = int(self.headers.get("Content-Length", 0) or 0)

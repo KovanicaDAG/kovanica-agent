@@ -6,3 +6,7 @@ __pycache__/
 # Local runtime state (checkpoint DB, indexer cache, etc.)
 data/
 *.sqlite3
+
+# Secrets and local clones
+.env
+repos/
