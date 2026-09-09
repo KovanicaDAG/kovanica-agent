@@ -1,0 +1,12 @@
+fastapi==0.115.*
+uvicorn[standard]==0.32.*
+langgraph==0.2.*
+langgraph-checkpoint-sqlite==1.0.*
+langchain-core==0.3.*
+langchain-openai==0.2.*
+qdrant-client==1.11.*
+fastembed>=0.3.0
+pydantic==2.9.*
+requests==2.32.*
+PyJWT==2.9.*
+cryptography==43.*

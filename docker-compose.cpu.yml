@@ -1,0 +1,68 @@
+version: "3.9"
+
+# CPU-only override for hosts without an NVIDIA GPU (e.g. the VPS).
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml \
+#     --profile build-only build sandbox-image
+#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d \
+#     qdrant sandbox-runner agent-api open-webui
+#
+# Replaces the vLLM service (needs a GPU) with Ollama running a small
+# coder model on CPU. Compose merges these overrides into the base file:
+# the service keeps the name `vllm` and agent-api's VLLM_BASE_URL switch
+# points it at Ollama's OpenAI-compatible /v1 on port 11434. Pull the
+# model first:
+#   docker compose -f docker-compose.yml -f docker-compose.cpu.yml \
+#     exec ollama ollama pull qwen2.5-coder:3b
+# then restart agent-api / open-webui so they pick it up.
+#
+# AGENT_MODEL is set to the CPU model name; graph.py defaults the other
+# way to the GPU model so both topologies are coherent.
+
+services:
+  vllm:
+    image: ollama/ollama:latest
+    command: ["serve"]
+    # Base vllm publishes 8000:8000 (vLLM); Ollama serves OpenAI-compat on
+    # 11434. The host already has something on 8000 (pm2 dashboard-api), so
+    # !reset the base ports entirely and publish only Ollama's.
+    ports: !override
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+    # Base file's vllm service carries the NVIDIA GPU reservation; clear it
+    # for CPU hosts (compose deep-merges lists, so !reset is required —
+    # an empty devices: [] would still append to the base's reservation).
+    deploy: !reset {}
+    restart: unless-stopped
+
+  agent-api:
+    # Host 8080 is taken on this VPS by a live kovanica-node metrics
+    # listener; publish the API on 13080 instead (nginx fronts it at
+    # kovanica.online/agent or a subdomain).
+    ports: !override
+      - "13080:8080"
+    environment:
+      - VLLM_BASE_URL=http://vllm:11434/v1
+      - AGENT_MODEL=qwen2.5-coder:3b
+    depends_on:
+      - qdrant
+      - sandbox-runner
+      # override base's vllm dep so this still resolves
+      - vllm
+
+  open-webui:
+      # Host port 3000 is already taken on this VPS (claudia-s-store
+    # container). Publish the WebUI on 13000 instead (nginx will front it
+    # at kovac.kovanica.online / kovanica.online/agent).
+    ports: !override
+      - "13000:8080"
+    environment:
+      - OPENAI_API_BASE_URL=http://vllm:11434/v1
+    depends_on:
+      - vllm
+
+volumes:
+  ollama-data:

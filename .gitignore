@@ -1,0 +1,8 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Local runtime state (checkpoint DB, indexer cache, etc.)
+data/
+*.sqlite3

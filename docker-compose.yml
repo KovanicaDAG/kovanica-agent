@@ -1,0 +1,147 @@
+version: "3.9"
+
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    command: >
+      --model Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
+      --quantization awq
+      --max-model-len 32768
+      --gpu-memory-utilization 0.90
+    ports:
+      - "8000:8000"
+    volumes:
+      - vllm-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: ["gpu"]
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+
+  agent-api:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    environment:
+      - VLLM_BASE_URL=http://vllm:8000/v1
+      - QDRANT_URL=http://qdrant:6333
+      - SANDBOX_IMAGE=kovanica-sandbox:latest
+      - SANDBOX_RUNNER_URL=http://sandbox-runner:8081
+      - REPOS_PATH=/repos
+      - AGENT_DB=/data/agent.sqlite3
+      # Optional auth: set AUTH_JWKS_URL (+ ISSUER/AUDIENCE/DEV_ROLES) for
+      # JWKS mode, or AUTH_DEV_TOKEN for dev-token mode. Unset = everyone is
+      # 'user' (fail-closed for dev).
+      - AUTH_JWKS_URL=${AUTH_JWKS_URL:-}
+      - AUTH_ISSUER=${AUTH_ISSUER:-}
+      - AUTH_AUDIENCE=${AUTH_AUDIENCE:-}
+      - AUTH_DEV_ROLES=${AUTH_DEV_ROLES:-}
+      - AUTH_DEV_TOKEN=${AUTH_DEV_TOKEN:-}
+      # Apply -> draft PR path (agent/apply.py). Fail-closed: unless
+      # AGENT_GIT_APPLY_ENABLED=1, /confirm only validates and reports
+      # (dry_run). AGENT_GIT_REPO should point at a read-only clone when the
+      # container cannot see the host checkout; set a git/gh identity + gh
+      # auth before arming.
+      - AGENT_GIT_APPLY_ENABLED=${AGENT_GIT_APPLY_ENABLED:-}
+      - AGENT_GIT_DRY_RUN=${AGENT_GIT_DRY_RUN:-1}
+      - AGENT_GIT_BASE=${AGENT_GIT_BASE:-main}
+      - AGENT_GIT_REPO=${AGENT_GIT_REPO:-/repos/kovanica-protocol}
+      - AGENT_GIT_REMOTE=${AGENT_GIT_REMOTE:-origin}
+      - AGENT_GH_BIN=${AGENT_GH_BIN:-gh}
+    volumes:
+      - ./repos:/repos:ro
+      - agent-data:/data   # persistent SQLite checkpoint + audit state
+    # SECURITY: agent-api does NOT mount /var/run/docker.sock (that would be
+    # effective root on the host). Sandbox containers are spawned exclusively
+    # by the scoped sandbox-runner sidecar, which agent-api talks to over HTTP
+    # (SANDBOX_RUNNER_URL). This keeps the Docker socket on exactly one
+    # least-privileged service.
+    depends_on:
+      - vllm
+      - qdrant
+      - sandbox-runner
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  # sandbox-runner is the ONLY service that mounts the Docker socket. It owns
+  # all container spawning and exposes a single restricted endpoint, POST /run
+  # (see sandbox/runner/server.py), which re-enforces the cargo whitelist and
+  # suspicious-arg filter server-side before spawning the ephemeral,
+  # network-disabled sandbox container.
+  sandbox-runner:
+    build: ./sandbox/runner
+    environment:
+      - SANDBOX_IMAGE=kovanica-sandbox:latest
+      - REPOS_PATH=/repos
+      - SANDBOX_RUNNER_HOST=0.0.0.0
+      - SANDBOX_RUNNER_PORT=8081
+    volumes:
+      # The shared read-only repo mount, so the sidecar can bind it into each
+      # sandbox container as /workspace:ro.
+      - ./repos:/repos:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    tmpfs:
+      - /tmp
+    read_only: true
+    # The runner image drops to a non-root user (sandbox-runner), but the
+    # docker.sock it must drive is owned root:docker — add the host docker
+    # group via group_add so the socket stays group-accessible without
+    # mounting it with a worse mode. Set DOCKER_GID on hosts where the
+    # group id differs from the default.
+    group_add:
+      - "${DOCKER_GID:-988}"
+    # privileged: false is the default; kept explicit for clarity — the socket
+    # is mounted deliberately, not via broad privileged access.
+    privileged: false
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    environment:
+      - OPENAI_API_BASE_URL=http://vllm:8000/v1
+    ports:
+      - "3000:8080"
+    volumes:
+      - webui-data:/app/backend/data
+    depends_on:
+      - vllm
+    restart: unless-stopped
+
+  # Not run as a persistent service. Build it once:
+  #   docker compose --profile build-only build sandbox-image
+  # sandbox-runner then spawns short-lived containers from this image per
+  # cargo call via the Docker SDK (see sandbox/runner/server.py: run_cargo).
+  #
+  # Context is the repo root (one level up from this compose file), not
+  # ./sandbox — sandbox/Dockerfile's pre-vendoring step COPYs Cargo.toml
+  # and each crate's Cargo.toml from crates/, which only exist at the repo
+  # root. `docker compose build` resolves this path relative to this
+  # file's directory (kovanica-agent/), so `..` is the protocol repo root.
+  # This also means kovanica-agent/ must stay checked out inside the
+  # kovanica-protocol repo tree at kovanica-agent/ (as it is here), not
+  # moved elsewhere on its own. A standalone kovanica-agent checkout should
+  # build the sandbox image with sandbox/build-image.sh instead.
+  sandbox-image:
+    build:
+      context: ..
+      dockerfile: kovanica-agent/sandbox/Dockerfile
+    image: kovanica-sandbox:latest
+    profiles: ["build-only"]
+
+volumes:
+  vllm-cache:
+  qdrant-data:
+  webui-data:
+  agent-data:
