@@ -137,7 +137,15 @@ def chat(req: ChatRequest, request: Request, authorization: str | None = Header(
             "messages": [str(m.content) for m in result["messages"][-3:]],
         }
 
-    return {"status": "ok", "reply": result["messages"][-1].content}
+    last = result["messages"][-1]
+    reply = getattr(last, "content", last)
+    if isinstance(reply, list):
+        reply = "".join(
+            (p.get("text", "") if isinstance(p, dict) else str(p)) for p in reply
+        )
+    elif not isinstance(reply, str):
+        reply = str(reply)
+    return {"status": "ok", "reply": reply}
 
 
 @app.post("/confirm")

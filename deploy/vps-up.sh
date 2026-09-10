@@ -50,20 +50,61 @@ source "$AGENT_ROOT/.env"
 set +a
 export DOCKER_GID="${DOCKER_GID:-$(stat -c %g /var/run/docker.sock 2>/dev/null || echo 988)}"
 
-echo "==> nginx vhost kovi.kovanica.online"
+echo "==> nginx vhost kovi.kovanica.online (HTTP + HTTPS)"
 if [[ -d /etc/nginx/sites-available ]]; then
-  cp "$AGENT_ROOT/deploy/nginx-kovi.conf" /etc/nginx/sites-available/kovi.kovanica.online
-  ln -sfn /etc/nginx/sites-available/kovi.kovanica.online /etc/nginx/sites-enabled/kovi.kovanica.online
+  # If kovi was added as a server_name on the website vhost, SNI steals
+  # requests. Strip it from every other site before installing ours.
+  for f in /etc/nginx/sites-available/* /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*; do
+    [[ -e "$f" ]] || continue
+    base="$(basename "$f")"
+    [[ "$base" == "kovi.kovanica.online" ]] && continue
+    if grep -q 'kovi\.kovanica\.online' "$f" 2>/dev/null; then
+      echo "    stripping kovi.kovanica.online from $f"
+      sed -i -E 's/[[:space:]]*kovi\.kovanica\.online//g' "$f"
+    fi
+  done
+
+  cert=""
+  key=""
+  for d in /etc/letsencrypt/live/kovi.kovanica.online \
+           /etc/letsencrypt/live/kovanica.online \
+           /etc/letsencrypt/live/explorer.kovanica.online; do
+    if [[ -f "$d/fullchain.pem" && -f "$d/privkey.pem" ]]; then
+      cert="$d/fullchain.pem"
+      key="$d/privkey.pem"
+      echo "    using cert $d"
+      break
+    fi
+  done
+  if [[ -z "$cert" ]]; then
+    echo "error: no TLS cert found under /etc/letsencrypt/live for kovi" >&2
+    ls -la /etc/letsencrypt/live || true
+    exit 1
+  fi
+
+  sed -e "s|__SSL_CERT__|$cert|g" -e "s|__SSL_KEY__|$key|g" \
+    "$AGENT_ROOT/deploy/nginx-kovi.conf" \
+    > /etc/nginx/sites-available/kovi.kovanica.online
+  ln -sfn /etc/nginx/sites-available/kovi.kovanica.online \
+    /etc/nginx/sites-enabled/kovi.kovanica.online
   nginx -t
   systemctl reload nginx
 else
   echo "warn: nginx sites-available missing; skip vhost" >&2
 fi
 
+echo "==> stopping previous agent compose (so ports can re-bind loopback)"
+for dir in "$AGENT_ROOT" /root/kovanica-agent; do
+  if [[ -f "$dir/docker-compose.yml" ]]; then
+    docker compose -f "$dir/docker-compose.yml" -f "$dir/docker-compose.cpu.yml" \
+      down --remove-orphans >/dev/null 2>&1 || true
+  fi
+done
+
 echo "==> docker compose build + up (qdrant, ollama/vllm, sandbox-runner, agent-api)"
 cd "$AGENT_ROOT"
 "${COMPOSE[@]}" build agent-api sandbox-runner
-"${COMPOSE[@]}" up -d qdrant vllm sandbox-runner agent-api
+"${COMPOSE[@]}" up -d --force-recreate qdrant vllm sandbox-runner agent-api
 
 echo "==> waiting for Ollama"
 ok=0

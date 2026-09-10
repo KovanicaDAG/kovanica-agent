@@ -14,11 +14,12 @@ Design rules baked into this file (do not weaken without a reason):
 """
 
 import os
+import re
 import time
 from typing import Literal, Optional, TypedDict, Annotated
 
 import requests
-from langchain_core.messages import AnyMessage, SystemMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
@@ -63,7 +64,7 @@ def _resolve_llm() -> ChatOpenAI:
         api_key=key,
         model=model,
         temperature=0.1,
-        timeout=120,
+        timeout=180,
         max_retries=1,
     )
 
@@ -229,6 +230,70 @@ if not os.path.isfile(_prompt_path):
 with open(_prompt_path) as f:
     SYSTEM_PROMPT = f.read()
 
+SYSTEM_PROMPT += (
+    "\n\n## Answering\n"
+    "Context from the codebase (and live node, when relevant) is injected for "
+    "you. Answer in clear prose. Never emit tool-call JSON, never dump "
+    "`{\"name\": ...}` as the reply, and never invent file paths.\n"
+)
+
+
+# ---------------------------------------------------------------------------
+# Grounding (CPU 3B models cannot reliably bind_tools)
+# ---------------------------------------------------------------------------
+
+_LIVE_HINTS = (
+    "head", "height", "tip", "testnet", "block count", "how many blocks",
+    "network status", "current block",
+)
+
+_TOOL_JSON_RE = re.compile(
+    r'\{\s*"name"\s*:\s*"(search_codebase|explain_concept|query_node_api|'
+    r'read_file|run_cargo_command|git_diff_suggest)"',
+    re.IGNORECASE,
+)
+
+
+def _msg_text(msg) -> str:
+    c = getattr(msg, "content", "") or ""
+    if isinstance(c, list):
+        parts = []
+        for p in c:
+            if isinstance(p, dict):
+                parts.append(str(p.get("text", "")))
+            else:
+                parts.append(str(p))
+        return "".join(parts)
+    return str(c)
+
+
+def _last_user_text(messages: list) -> str:
+    for m in reversed(messages or []):
+        kind = getattr(m, "type", None) or getattr(m, "role", None)
+        if kind in ("human", "user") or isinstance(m, HumanMessage):
+            return _msg_text(m)
+    return _msg_text(messages[-1]) if messages else ""
+
+
+def _grounding_context(question: str) -> str:
+    """Always retrieve RAG (and live head when asked) so the 3B model
+    does not have to emit a tool call to be useful."""
+    chunks: list[str] = []
+    try:
+        found = _rag_search_codebase(question, k=4)
+        if found:
+            chunks.append(found[:4500])
+    except Exception as exc:
+        chunks.append(f"(code search unavailable: {exc.__class__.__name__})")
+    q = (question or "").lower()
+    if any(h in q for h in _LIVE_HINTS):
+        try:
+            live = query_node_api.invoke({"endpoint": "/api/head"})
+            chunks.append("Live node /api/head:\n" + str(live)[:1500])
+        except Exception:
+            pass
+    return "\n\n".join(chunks)
+
 
 # ---------------------------------------------------------------------------
 # Nodes
@@ -241,10 +306,46 @@ def router(state: AgentState) -> AgentState:
 
 
 def agent_node(state: AgentState) -> AgentState:
-    tools = DEV_TOOLS if state["role"] == "dev" else USER_TOOLS
-    bound_llm = llm.bind_tools(tools)
-    messages = [SystemMessage(content=SYSTEM_PROMPT), *state["messages"]]
-    response = bound_llm.invoke(messages)
+    role = state.get("role") or "user"
+    tools = DEV_TOOLS if role == "dev" else USER_TOOLS
+    user_text = _last_user_text(state["messages"])
+    grounding = _grounding_context(user_text) if user_text else ""
+
+    sys = SYSTEM_PROMPT
+    if grounding:
+        sys += (
+            "\n\n## Retrieved context (already fetched — do not emit tool-call JSON)\n"
+            "Write a direct answer in prose. Cite file paths from this context "
+            "when you use them.\n\n"
+            + grounding
+        )
+    messages = [SystemMessage(content=sys), *state["messages"]]
+
+    if role == "dev":
+        response = llm.bind_tools(tools).invoke(messages)
+    else:
+        # qwen2.5-coder:3b via Ollama /v1 dumps fake tool JSON when bind_tools
+        # is used; skip tools and answer from the retrieved context instead.
+        response = llm.invoke(messages)
+
+    text = _msg_text(response)
+    if (
+        role != "dev"
+        and text
+        and _TOOL_JSON_RE.search(text)
+        and not getattr(response, "tool_calls", None)
+    ):
+        retry = messages + [
+            AIMessage(content=text),
+            HumanMessage(
+                content=(
+                    "Do not output JSON or tool calls. Answer the original "
+                    "question in plain prose using the retrieved context."
+                )
+            ),
+        ]
+        response = llm.invoke(retry)
+
     return {"messages": [response]}
 
 

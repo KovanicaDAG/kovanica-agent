@@ -173,8 +173,9 @@
       logEl.scrollTop = logEl.scrollHeight;
       return div;
     }
-    function format(text) {
-      const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&", "<": "<", ">": ">" }[c]));
+        function format(text) {
+      const map = {"&": "&amp;", "<": "&lt;", ">": "&gt;"};
+      const esc = (s) => s.replace(/[&<>]/g, (c) => map[c]);
       let s = esc(text || "");
       s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
       return s;
