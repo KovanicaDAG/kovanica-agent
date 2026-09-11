@@ -24,13 +24,14 @@ logger = logging.getLogger(__name__)
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 DEFAULT_COLLECTION = "kovanica_codebase"
+DEFAULT_SKILL_DOCS_COLLECTION = "kovanica_skill_docs"
 VECTOR_SIZE = 384  # BAAI/bge-small-en-v1.5
 
 # Rust-aware chunking: split on these top-level item introducers.
 _RUST_ITEM_RE = re.compile(
     r"^\s*(?:pub\s+)?(?:pub\(\w+\)\s+)?"
     r"(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?"
-    r"(?:extern\s+(?:\"[^\"]*\"\s+)?)?"
+    r"(?:extern\s+(\"[^\"]*\")?\s+)?"
     r"(?:fn|impl|struct|enum|trait|mod)\s"
 )
 
@@ -140,7 +141,7 @@ def _strip_line_for_brace_scan(line: str, in_block_comment: bool) -> tuple[str, 
             i += 1
             continue
         if c == "'":
-            # Could be a char literal ('a', '\n') or a lifetime ('static).
+            # Could be a char literal ('a', '\\n') or a lifetime ('static).
             # Heuristic: char literals close within 4 chars via an
             # unescaped closing quote; lifetimes don't. Treat as char
             # literal only when we can see the closing quote nearby.
@@ -290,7 +291,6 @@ def _split_generic(content: str) -> list[str]:
 
     return sections
 
-
 def chunk_generic(content: str, rel_path: str, abs_path: str, lang: str) -> list[Chunk]:
     """Chunk non-Rust files by headers/blank-lines, merge to ~1000 chars."""
     sections = _split_generic(content)
@@ -410,7 +410,6 @@ def chunk_file(content: str, rel_path: str, abs_path: str) -> list[Chunk]:
     lang = Path(rel_path).suffix or ".txt"
     return chunk_generic(content, rel_path, abs_path, lang)
 
-
 def walk_repo(repo_root: str) -> list[tuple[str, str]]:
     """Walk repo_root and return (abs_path, rel_path) pairs for indexable files."""
     root = Path(repo_root).resolve()
@@ -443,7 +442,6 @@ def get_qdrant_client():
     from qdrant_client import QdrantClient
     return QdrantClient(url=QDRANT_URL)
 
-
 def recreate_collection(client, collection: str) -> None:
     """Drop (if present) and recreate a Qdrant collection with cosine distance."""
     from qdrant_client.models import Distance, VectorParams
@@ -452,7 +450,6 @@ def recreate_collection(client, collection: str) -> None:
         vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
     )
     logger.info("Recreated collection '%s' (dim=%d, cosine)", collection, VECTOR_SIZE)
-
 
 def ensure_collection(client, collection: str) -> None:
     """Create the collection if it doesn't already exist; no-op otherwise.
@@ -475,9 +472,15 @@ def ensure_collection(client, collection: str) -> None:
     )
     logger.info("Created collection '%s' (dim=%d, cosine)", collection, VECTOR_SIZE)
 
+def upsert_chunks(
+    client, collection: str, chunks: list[Chunk], embedder, source: str = "code",
+) -> None:
+    """Embed chunks and upsert them into the Qdrant collection in batches.
 
-def upsert_chunks(client, collection: str, chunks: list[Chunk], embedder) -> None:
-    """Embed chunks and upsert them into the Qdrant collection in batches."""
+    ``source`` is stamped onto every payload ("code" or "skill_doc") so
+    downstream search/citation logic can tell a real repo file from
+    reference material and never mis-cite one as the other.
+    """
     from qdrant_client.models import PointStruct
 
     batch_size = 64
@@ -505,6 +508,7 @@ def upsert_chunks(client, collection: str, chunks: list[Chunk], embedder) -> Non
                     "start_line": chunk.start_line,
                     "end_line": chunk.end_line,
                     "abs_path": chunk.file_path,
+                    "source": source,
                 },
             ))
 
@@ -517,43 +521,17 @@ def upsert_chunks(client, collection: str, chunks: list[Chunk], embedder) -> Non
 # CLI
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    """Entry point: walk a repo, chunk, embed, index into Qdrant."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
+def _index_path(
+    client, embedder, root: str, collection: str, source: str,
+) -> tuple[int, int]:
+    """Shared body for both index modes: walk, chunk, embed, upsert.
 
-    parser = argparse.ArgumentParser(
-        description="Index a repo into Qdrant for the Kovanica agent.",
-    )
-    parser.add_argument(
-        "--repo", default="/repos/kovanica-protocol",
-        help="Path to the repo root (default: /repos/kovanica-protocol)",
-    )
-    parser.add_argument(
-        "--collection", default=DEFAULT_COLLECTION,
-        help=f"Qdrant collection name (default: {DEFAULT_COLLECTION})",
-    )
-    parser.add_argument(
-        "--recreate", action="store_true",
-        help="Drop and recreate the collection before indexing",
-    )
-    args = parser.parse_args()
-
-    client = get_qdrant_client()
-
-    if args.recreate:
-        recreate_collection(client, args.collection)
-    else:
-        ensure_collection(client, args.collection)
-
-    files = walk_repo(args.repo)
+    Returns (file_count, chunk_count).
+    """
+    files = walk_repo(root)
     if not files:
-        logger.warning("No indexable files found in %s", args.repo)
-        return
-
-    embedder = get_embedder()
+        logger.warning("No indexable files found in %s", root)
+        return (0, 0)
 
     all_chunks: list[Chunk] = []
     for abs_path, rel_path in files:
@@ -565,17 +543,111 @@ def main() -> None:
         except Exception:
             logger.exception("Failed to chunk %s", rel_path)
 
-    logger.info(
-        "Chunked %d files into %d chunks", len(files), len(all_chunks),
-    )
+    logger.info("Chunked %d files into %d chunks", len(files), len(all_chunks))
 
     if all_chunks:
-        upsert_chunks(client, args.collection, all_chunks, embedder)
+        upsert_chunks(client, collection, all_chunks, embedder, source=source)
 
-    logger.info(
-        "Done — %d files, %d chunks indexed into '%s'",
-        len(files), len(all_chunks), args.collection,
+    return (len(files), len(all_chunks))
+
+
+def main() -> None:
+    """Entry point: walk a repo (and/or a skill-docs dir), chunk, embed,
+    index into Qdrant.
+
+    Modes (independent, either or both can run in one invocation):
+      --repo PATH        code + docs from a kovanica-protocol checkout
+                          -> --collection (default 'kovanica_codebase'),
+                             payload source="code"
+      --skill-docs PATH  reference/*.md from the kovanica-blockchain-developer
+                          skill -> --skill-docs-collection (default
+                             'kovanica_skill_docs'), payload source="skill_doc"
+
+    Keeping these in separate collections (rather than merging skill docs
+    into kovanica_codebase) avoids two problems: mixing prose and Rust code
+    in one vector space degrades retrieval quality for both, and merging
+    would make citations ambiguous (a skill doc has no real repo path, so
+    citing it as one would be misleading).
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+
+    parser = argparse.ArgumentParser(
+        description="Index a repo and/or skill docs into Qdrant for the Kovanica agent.",
+    )
+    parser.add_argument(
+        "--repo", default=None,
+        help="Path to a kovanica-protocol repo root to index as code/docs "
+             "(default: /repos/kovanica-protocol if neither --repo nor "
+             "--skill-docs is given).",
+    )
+    parser.add_argument(
+        "--collection", default=DEFAULT_COLLECTION,
+        help=f"Qdrant collection name for --repo (default: {DEFAULT_COLLECTION})",
+    )
+    parser.add_argument(
+        "--skill-docs", default=None,
+        help="Path to the kovanica-blockchain-developer skill's 'references/' "
+             "directory to index as reference docs (e.g. "
+             "/mnt/skills/kovanica-blockchain-developer/references).",
+    )
+    parser.add_argument(
+        "--skill-docs-collection", default=DEFAULT_SKILL_DOCS_COLLECTION,
+        help=f"Qdrant collection name for --skill-docs (default: {DEFAULT_SKILL_DOCS_COLLECTION})",
+    )
+    parser.add_argument(
+        "--recreate", action="store_true",
+        help="Drop and recreate the target collection(s) before indexing",
+    )
+    args = parser.parse_args()
+
+    if args.repo is None and args.skill_docs is None:
+        args.repo = "/repos/kovanica-protocol"
+
+    client = get_qdrant_client()
+    embedder = None  # lazy: only load once we know there's something to embed
+
+    total_files = 0
+    total_chunks = 0
+
+    if args.repo is not None:
+        if args.recreate:
+            recreate_collection(client, args.collection)
+        else:
+            ensure_collection(client, args.collection)
+
+        embedder = embedder or get_embedder()
+        n_files, n_chunks = _index_path(
+            client, embedder, args.repo, args.collection, source="code",
+        )
+        total_files += n_files
+        total_chunks += n_chunks
+        logger.info(
+            "Repo done — %d files, %d chunks indexed into '%s' (source=code)",
+            n_files, n_chunks, args.collection,
+        )
+
+    if args.skill_docs is not None:
+        if args.recreate:
+            recreate_collection(client, args.skill_docs_collection)
+        else:
+            ensure_collection(client, args.skill_docs_collection)
+
+        embedder = embedder or get_embedder()
+        n_files, n_chunks = _index_path(
+            client, embedder, args.skill_docs, args.skill_docs_collection,
+            source="skill_doc",
+        )
+        total_files += n_files
+        total_chunks += n_chunks
+        logger.info(
+            "Skill docs done — %d files, %d chunks indexed into '%s' (source=skill_doc)",
+            n_files, n_chunks, args.skill_docs_collection,
+        )
+
+    logger.info("All done — %d files, %d chunks total", total_files, total_chunks)
 
 
 if __name__ == "__main__":

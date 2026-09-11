@@ -21,7 +21,9 @@ import json
 import os
 import time
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Type
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,7 +34,6 @@ from pydantic import BaseModel
 from auth import verify_token
 from graph import build_graph
 import patchstore as _patchstore
-import apply as _apply
 
 app = FastAPI(title="Kovi — Kovanica Engineering Agent")
 agent_graph = build_graph()
@@ -87,6 +88,73 @@ def audit(event: dict) -> None:
         f.write(json.dumps(event) + "\n")
 
 
+# ---------------------------------------------------------------------------
+# Action registry
+# ---------------------------------------------------------------------------
+# Each registered action is a POST endpoint with:
+#   path        - URL path (e.g. "/chat", "/confirm")
+#   model       - Pydantic request body model
+#   handler     - async def handler(req: Model, request: Request,
+#                               authorization: str | None = Header(default=None))
+#   summary     - optional OpenAPI summary
+#   require_dev - if True, reject non-dev roles with 403 before the handler
+#
+# register_action() both registers the route on ``app`` and records metadata
+# in _ACTION_REGISTRY so the set of live actions is introspectable (docs,
+# tests, audit) without re-parsing FastAPI routes.
+
+@dataclass
+class ActionSpec:
+    path: str
+    model: Type[BaseModel]
+    handler: Callable
+    summary: str = ""
+    require_dev: bool = False
+
+
+_ACTION_REGISTRY: dict[str, ActionSpec] = {}
+
+
+def register_action(
+    path: str,
+    model: Type[BaseModel],
+    *,
+    summary: str = "",
+    require_dev: bool = False,
+) -> Callable:
+    """Decorator that registers a POST action on ``app`` and in the registry.
+
+    Usage::
+
+        @register_action("/chat", ChatRequest, summary="Send a message")
+        async def chat(req: ChatRequest, request: Request,
+                       authorization: str | None = Header(default=None)):
+            ...
+    """
+
+    def decorator(handler: Callable) -> Callable:
+        app.post(path, summary=summary or path)(handler)
+        _ACTION_REGISTRY[path] = ActionSpec(
+            path=path,
+            model=model,
+            handler=handler,
+            summary=summary,
+            require_dev=require_dev,
+        )
+        return handler
+
+    return decorator
+
+
+def list_actions() -> list[ActionSpec]:
+    """Return the currently registered actions, in registration order."""
+    return list(_ACTION_REGISTRY.values())
+
+
+# ---------------------------------------------------------------------------
+# Request models
+# ---------------------------------------------------------------------------
+
 class ChatRequest(BaseModel):
     session_id: str
     message: str
@@ -97,8 +165,12 @@ class ConfirmRequest(BaseModel):
     approve: bool
 
 
+# ---------------------------------------------------------------------------
+# Static + health endpoints (direct decorators — stable, no body)
+# ---------------------------------------------------------------------------
+
 @app.get("/")
-def index():
+def index() -> FileResponse:
     index_path = STATIC_DIR / "index.html"
     if not index_path.is_file():
         raise HTTPException(status_code=404, detail="UI not packaged")
@@ -109,8 +181,51 @@ if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-@app.post("/chat")
-def chat(req: ChatRequest, request: Request, authorization: str | None = Header(default=None)):
+@app.get("/healthz")
+def healthz() -> dict:
+    return {"status": "ok", "name": "kovi"}
+
+
+@app.get("/readyz")
+def readyz() -> dict:
+    """Best-effort dependency probe. Liveness is /healthz; this is informational."""
+    qdrant = os.environ.get("QDRANT_URL", "http://qdrant:6333")
+    llm = os.environ.get("LLM_BASE_URL") or os.environ.get("VLLM_BASE_URL", "")
+    deps: dict[str, str] = {"qdrant": "unknown", "llm": "unknown"}
+    try:
+        import requests
+
+        r = requests.get(f"{qdrant.rstrip('/')}/readyz", timeout=2)
+        deps["qdrant"] = "ok" if r.status_code < 500 else f"http {r.status_code}"
+    except Exception as exc:
+        deps["qdrant"] = f"error: {exc.__class__.__name__}"
+    try:
+        import requests
+
+        if llm:
+            r = requests.get(f"{llm.rstrip('/')}/models", timeout=2)
+            deps["llm"] = "ok" if r.status_code < 500 else f"http {r.status_code}"
+        else:
+            deps["llm"] = "unset"
+    except Exception as exc:
+        deps["llm"] = f"error: {exc.__class__.__name__}"
+    return {"status": "ok", "name": "kovi", "deps": deps}
+
+
+# ---------------------------------------------------------------------------
+# Registered POST actions
+# ---------------------------------------------------------------------------
+
+@register_action(
+    "/chat",
+    ChatRequest,
+    summary="Send a message and get the agent's response",
+)
+async def chat(
+    req: ChatRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict:
     if not _rate_ok(_client_ip(request)):
         raise HTTPException(status_code=429, detail="Too many requests")
     message = (req.message or "").strip()
@@ -127,8 +242,9 @@ def chat(req: ChatRequest, request: Request, authorization: str | None = Header(
         config=config,
     )
 
-    audit({"session_id": req.session_id, "role": role, "event": "chat",
-           "message": message[:500]})
+    audit(
+        {"session_id": req.session_id, "role": role, "event": "chat", "message": message[:500]}
+    )
 
     if result.get("pending_confirmation"):
         return {
@@ -148,8 +264,17 @@ def chat(req: ChatRequest, request: Request, authorization: str | None = Header(
     return {"status": "ok", "reply": reply}
 
 
-@app.post("/confirm")
-def confirm(req: ConfirmRequest, request: Request, authorization: str | None = Header(default=None)):
+@register_action(
+    "/confirm",
+    ConfirmRequest,
+    summary="Approve or reject a pending diff proposal",
+    require_dev=True,
+)
+async def confirm(
+    req: ConfirmRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict:
     if not _rate_ok(_client_ip(request)):
         raise HTTPException(status_code=429, detail="Too many requests")
     role = verify_token(authorization)
@@ -158,85 +283,102 @@ def confirm(req: ConfirmRequest, request: Request, authorization: str | None = H
 
     config = {"configurable": {"thread_id": req.session_id}}
 
-    audit({"session_id": req.session_id, "role": role, "event": "confirm",
-           "approved": req.approve})
+    audit(
+        {"session_id": req.session_id, "role": role, "event": "confirm", "approved": req.approve}
+    )
 
     if not req.approve:
         # Reject: drop the staged proposals and resume the graph to record the
         # human's decision without applying anything.
         _patchstore.clear(req.session_id)
-        result = agent_graph.invoke(None, config=config)
-        return {"status": "rejected", "detail": "Proposal discarded (not applied).",
-                "reply": result["messages"][-1].content}
+        return {
+            "status": "rejected",
+            "detail": "Proposal discarded (not applied).",
+            "reply": "Proposal discarded.",
+        }
 
-    # Approve: turn the staged proposals into a throwaway git branch + draft PR
-    # via apply.py. This is the only path that touches a real git repo — dev
-    # role only (checked above). Fail-closed: apply_and_open_pr returns a
-    # dry_run/error unless AGENT_GIT_APPLY_ENABLED == "1".
+    # ---------- no proposals: fast path ---------- #
     proposals = _patchstore.get_proposals(req.session_id)
     if not proposals:
         # No patchable proposal staged (e.g. the agent only answered a query);
-        # still resume the graph past the gate so the session continues cleanly.
-        result = agent_graph.invoke(None, config=config)
-        return {"status": "approved", "reply": result["messages"][-1].content,
-                "applied": []}
+        # nothing to apply — report approved with an empty applied list.
+        return {
+            "status": "approved",
+            "reply": "No pending proposals to apply.",
+            "applied": [],
+        }
 
-    apply_result = _apply.apply_and_open_pr(
-        req.session_id, proposals, base=os.environ.get("AGENT_GIT_BASE", "main"),
-        dry_run=(os.environ.get("AGENT_GIT_DRY_RUN", "1") == "1"),
-    )
-
-    if apply_result.status == "ok":
-        _patchstore.mark_applied(req.session_id, [p.id for p in proposals])
-    else:
-        # Nothing was applied; keep the proposals so a corrected attempt (or
-        # manual review) can still happen. Not clearing on error.
-        pass
-
-    audit({"session_id": req.session_id, "role": role, "event": "apply",
-           "status": apply_result.status, "branch": apply_result.branch,
-           "pr_url": apply_result.pr_url, "detail": apply_result.detail})
-
-    # Resume the graph past the human gate so execution is not left dangling.
+    # ---------- proposals: apply path ---------- #
+    # Delegate to the apply-agent subservice over HTTP (compose internal).
+    # This isolates git/gh/GPG mutations from the orchestrator process.
+    apply_url = (
+        (os.environ.get("APPLY_AGENT_URL") or "").strip()
+        or "http://apply-agent:8083"
+    ).rstrip("/")
+    apply_body = {
+        "session_id": req.session_id,
+        "proposals": [
+            {"path": p.path, "explanation": p.explanation, "patch": p.patch}
+            for p in proposals
+        ],
+        "base": os.environ.get("AGENT_GIT_BASE", "main"),
+    }
     try:
-        result = agent_graph.invoke(None, config=config)
-    except Exception as exc:  # pragma: no cover - resume is best-effort
-        result = {"messages": []}
+        apply_resp = requests.post(
+            f"{apply_url}/apply", json=apply_body,
+            timeout=int(os.environ.get("APPLY_AGENT_TIMEOUT_S", "180") or 180),
+        )
+        apply_resp.raise_for_status()
+        apply_result = apply_resp.json()
+    except requests.ConnectionError:
+        return {
+            "status": "error",
+            "reply": f"apply-agent not reachable at {apply_url}",
+            "detail": f"apply-agent not reachable at {apply_url}",
+        }
+    except requests.Timeout:
+        return {
+            "status": "error",
+            "reply": "apply-agent timed out",
+            "detail": "apply-agent timed out",
+        }
+    except requests.HTTPError as exc:
+        try:
+            detail = exc.response.json().get("detail", str(exc))
+        except Exception:
+            detail = str(exc)
+        return {
+            "status": "error",
+            "reply": detail,
+            "detail": detail,
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "reply": str(exc),
+            "detail": str(exc),
+        }
+
+    if apply_result.get("status") == "ok":
+        _patchstore.mark_applied(req.session_id, [p.id for p in proposals])
+
+    audit(
+        {
+            "session_id": req.session_id,
+            "role": role,
+            "event": "apply",
+            "status": apply_result.status,
+            "branch": apply_result.branch,
+            "pr_url": apply_result.pr_url,
+            "detail": apply_result.detail,
+        }
+    )
 
     return {
         "status": apply_result.status,
-        "reply": result["messages"][-1].content if result.get("messages") else "",
+        "reply": apply_result.detail or "Proposal processed.",
         "applied_files": apply_result.applied_files,
         "branch": apply_result.branch,
         "pr_url": apply_result.pr_url,
         "detail": apply_result.detail,
     }
-
-
-@app.get("/healthz")
-def healthz():
-    return {"status": "ok", "name": "kovi"}
-
-
-@app.get("/readyz")
-def readyz():
-    """Best-effort dependency probe. Liveness is /healthz; this is informational."""
-    qdrant = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-    llm = os.environ.get("LLM_BASE_URL") or os.environ.get("VLLM_BASE_URL", "")
-    deps = {"qdrant": "unknown", "llm": "unknown"}
-    try:
-        import requests
-        r = requests.get(f"{qdrant.rstrip('/')}/readyz", timeout=2)
-        deps["qdrant"] = "ok" if r.status_code < 500 else f"http {r.status_code}"
-    except Exception as exc:
-        deps["qdrant"] = f"error: {exc.__class__.__name__}"
-    try:
-        import requests
-        if llm:
-            r = requests.get(f"{llm.rstrip('/')}/models", timeout=2)
-            deps["llm"] = "ok" if r.status_code < 500 else f"http {r.status_code}"
-        else:
-            deps["llm"] = "unset"
-    except Exception as exc:
-        deps["llm"] = f"error: {exc.__class__.__name__}"
-    return {"status": "ok", "name": "kovi", "deps": deps}

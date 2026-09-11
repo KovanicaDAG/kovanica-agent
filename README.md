@@ -37,6 +37,17 @@ docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d \
 # 3. Pull the model (GPU: vLLM serves Qwen/Qwen2.5-Coder-32B-Instruct-AWQ;
 #    CPU: ollama pull qwen2.5-coder:3b) and index the repo once:
 docker exec kovanica-agent-agent-api-1 python /app/indexer.py --repo /repos/kovanica-protocol
+
+# 3b. Optional: also index the Kovanica Blockchain Developer skill's
+#     reference docs (RFC-001..006, tokenomics, GHOSTDAG notes, node ops,
+#     API shapes, mainnet checklist) into their own collection, so
+#     search_kovanica_docs / explain_concept can ground on them. Mount or
+#     copy the skill's `references/` dir into the container first, e.g. at
+#     /skills/kovanica-blockchain-developer/references, then:
+docker exec kovanica-agent-agent-api-1 python /app/indexer.py \
+  --skill-docs /skills/kovanica-blockchain-developer/references
+# Re-run (no --recreate needed) whenever the skill's reference docs change.
+# --repo and --skill-docs can also be combined in one invocation.
 ```
 
 Kovi UI:     http://localhost:13080  (GPU: :8080) — also https://kovi.kovanica.online
@@ -44,7 +55,7 @@ Agent API:   POST /chat  and  POST /confirm
 Open WebUI:  operator profile only (`--profile operator`), loopback :13000 / :3000
 
 Set `AUTH_DEV_TOKEN` in `.env` (compose reads it) — a request with
-`Authorization: Bearer <token>` maps to the `dev` role (needed for `/confirm`).
+`Authorization: Bearer *** maps to the `dev` role (needed for `/confirm`).
 Without it, every visitor is `user` (read-only tools). Copy `.env.example`.
 
 ## Architecture — who owns the Docker socket
@@ -91,6 +102,16 @@ agent-api ──POST /run──▶ sandbox-runner (owns docker.sock) ──spawn
   numbers) + markdown/section chunking for docs, embedded via fastembed
   (`BAAI/bge-small-en-v1.5`, 384-dim) into a Qdrant `kovanica_codebase` collection.
   Index with: `python -m indexer --repo /repos/kovanica-protocol --recreate`.
+- **RAG skill-docs search** (same `rag.py`/`indexer.py`, separate collection):
+  the Kovanica Blockchain Developer skill's `references/*.md` (RFCs,
+  tokenomics, GHOSTDAG notes, node ops, API shapes) indexed into
+  `kovanica_skill_docs` with payload `source=skill_doc`, kept out of the
+  code collection so citations never conflate a reference doc with a real
+  repo path. Exposed via the `search_kovanica_docs` tool (both dev and user
+  roles) and folded into `explain_concept` and the CPU-model grounding
+  fallback. Index with:
+  `python -m indexer --skill-docs /path/to/references --recreate`.
+
 - **Read-only testnet RPC** (`query_node_api`): allowlisted read-only endpoints
   against `KOVANICA_NODE_URL` (default `https://explorer.kovanica.online`);
   anything touching `mine`/`faucet`/`submit`/`operator` is rejected.

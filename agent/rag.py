@@ -16,13 +16,15 @@ log = logging.getLogger(__name__)
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "kovanica_codebase")
+QDRANT_SKILL_DOCS_COLLECTION = os.environ.get(
+    "QDRANT_SKILL_DOCS_COLLECTION", "kovanica_skill_docs",
+)
 
 # ---------------------------------------------------------------------------
 # Embedder (lazy, import-safe)
 # ---------------------------------------------------------------------------
 
 _embed_query = None  # type: Optional[callable]
-
 
 def _get_embed_query():
     """Return ``embed_query(text) -> list[float]``, importing once."""
@@ -44,7 +46,6 @@ def _get_embed_query():
 
 _qdrant_client = None  # type: Optional[object]
 
-
 def _get_qdrant():
     """Return a ``QdrantClient``, creating once."""
     global _qdrant_client
@@ -63,16 +64,11 @@ def _get_qdrant():
 # Public API
 # ---------------------------------------------------------------------------
 
-def search_codebase(query: str, k: int = 5) -> str:
-    """Semantic search over the ``kovanica_codebase`` Qdrant collection.
+def _search_collection(query: str, collection: str, k: int, label: str) -> str:
+    """Shared body: embed *query*, search *collection*, format hits.
 
-    Returns top-*k* hits formatted as::
-
-        [rel_path:start_line-end_line] score=0.xx
-        <text snippet>
-
-    Falls back to a helpful error string when dependencies or the collection
-    are unavailable.
+    *label* is used only in the "not found" / "unavailable" error strings so
+    callers get a message that names the right collection.
     """
     embed_fn = _get_embed_query()
     if embed_fn is None:
@@ -95,7 +91,7 @@ def search_codebase(query: str, k: int = 5) -> str:
 
     try:
         hits = client.search(
-            collection_name=QDRANT_COLLECTION,
+            collection_name=collection,
             query_vector=vector,
             limit=k,
         )
@@ -103,8 +99,8 @@ def search_codebase(query: str, k: int = 5) -> str:
         msg = str(exc)
         if "not found" in msg.lower() or "collection" in msg.lower():
             return (
-                f"Collection '{QDRANT_COLLECTION}' not found in Qdrant. "
-                "Run the indexer first to populate the vector store."
+                f"Collection '{collection}' not found in Qdrant. "
+                f"Run the indexer first to populate the {label} vector store."
             )
         return f"Search error (Qdrant): {exc}"
 
@@ -118,7 +114,43 @@ def search_codebase(query: str, k: int = 5) -> str:
         start = payload.get("start_line", payload.get("start", "?"))
         end = payload.get("end_line", payload.get("end", "?"))
         text = payload.get("text", payload.get("content", ""))
+        source = payload.get("source", "code")
         score = hit.score
-        lines.append(f"[{rel_path}:{start}-{end}] score={score:.2f}")
+        lines.append(f"[{source}:{rel_path}:{start}-{end}] score={score:.2f}")
         lines.append(text)
     return "\n".join(lines)
+
+
+def search_codebase(query: str, k: int = 5) -> str:
+    """Semantic search over the ``kovanica_codebase`` Qdrant collection.
+
+    Returns top-*k* hits formatted as::
+
+        [source:rel_path:start_line-end_line] score=0.xx
+        <text snippet>
+
+    ``source`` is ``code`` for real repo files. Falls back to a helpful
+    error string when dependencies or the collection are unavailable.
+    """
+    return _search_collection(query, QDRANT_COLLECTION, k, label="codebase")
+
+
+def search_kovanica_docs(query: str, k: int = 5) -> str:
+    """Semantic search over the ``kovanica_skill_docs`` Qdrant collection —
+    the Kovanica Blockchain Developer skill's reference material (RFC-001
+    through RFC-006, tokenomics, GHOSTDAG notes, node ops, API shapes,
+    mainnet checklist, FAQ, cheat-sheet).
+
+    These are protocol reference docs, not files in the kovanica-protocol
+    repo — every hit is tagged ``source=skill_doc`` in its citation
+    (``[skill_doc:tokenomics.md:12-34]``) so it is never mistaken for, or
+    cited as, a real repo path. When the monorepo's own ``docs/`` disagrees
+    with a skill doc, the monorepo wins (per the skill's own guidance) —
+    say so if you notice a conflict rather than silently preferring one.
+
+    Falls back to a helpful error string when dependencies or the
+    collection are unavailable.
+    """
+    return _search_collection(
+        query, QDRANT_SKILL_DOCS_COLLECTION, k, label="skill docs",
+    )

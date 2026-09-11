@@ -24,8 +24,8 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
 
-from rag import search_codebase as _rag_search_codebase
 from checkpoint import get as _get_checkpoint
 from sandbox_client import run_cargo as _sidecar_run_cargo
 import patchstore as _patchstore
@@ -35,6 +35,34 @@ try:  # langgraph.config via contextvar; absent in some old runtimes
 except Exception:  # pragma: no cover - defensive fallback
     _get_config = None
 
+
+def _search_agent_url() -> str:
+    """Base URL of the search-agent subservice (HTTP, compose internal)."""
+    return (
+        (os.environ.get("SEARCH_AGENT_URL") or "").strip()
+        or "http://search-agent:8082"
+    )
+
+
+def _search_agent_post(path: str, body: dict) -> dict:
+    """POST to the search-agent subservice and return its JSON body.
+
+    Falls back to a helpful error string when the subservice is unreachable
+    (e.g. before it has started, or on a dev host without the compose stack).
+    """
+    url = (_search_agent_url() + path).rstrip("/")
+    try:
+        resp = requests.post(url, json=body, timeout=20)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.ConnectionError:
+        return {"error": f"search-agent not reachable at {url}"}
+    except requests.Timeout:
+        return {"error": f"search-agent timed out at {url}"}
+    except requests.HTTPError as exc:
+        return {"error": f"search-agent returned HTTP {exc.response.status_code}"}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name, default) or default).strip()
@@ -93,10 +121,33 @@ class AgentState(TypedDict):
 
 @tool
 def search_codebase(query: str) -> str:
-    """Semantic + keyword search over the indexed Kovanica codebase and docs.
-    Returns matching chunks with file path + line range so the agent can cite them.
+    """Semantic + keyword search over the indexed Kovanica codebase.
+
+    Delegates to the search-agent subservice over HTTP (compose internal)
+    instead of importing rag.py directly, so search is an independently
+    deployable service. Returns matching chunks with file path + line range.
     """
-    return _rag_search_codebase(query)
+    body = _search_agent_post("/search/code", {"query": query, "k_code": 5, "k_docs": 5})
+    if "error" in body:
+        return f"(code search unavailable: {body['error']})"
+    return body.get("results", body.get("code", str(body)))
+
+
+@tool
+def search_kovanica_docs(query: str) -> str:
+    """Semantic search over the Kovanica Blockchain Developer skill's
+    reference docs — RFC-001..006, tokenomics, GHOSTDAG notes, node ops,
+    API shapes, mainnet checklist, FAQ, cheat-sheet.
+
+    Delegates to the search-agent subservice over HTTP (compose internal).
+    Results are tagged [skill_doc:...] — cite them as skill docs, never as
+    repo file paths, and defer to the monorepo's own docs/ or code if the
+    two disagree.
+    """
+    body = _search_agent_post("/search/docs", {"query": query, "k_code": 5, "k_docs": 5})
+    if "error" in body:
+        return f"(skill docs search unavailable: {body['error']})"
+    return body.get("results", body.get("docs", str(body)))
 
 
 @tool
@@ -155,7 +206,7 @@ def git_diff_suggest(path: str, explanation: str, patch: str) -> str:
         "PROPOSED (not applied). This diff is staged for human review and will "
         f"be applied to a throwaway branch + draft PR on /confirm.\n"
         f"File: {path}\nWhy: {explanation}\n---\n{patch}"
-        + ("\n[staged=true]" if stored else "\n[staged=false: store write failed]")
+        + ("[staged=true]" if stored else "[staged=false: store write failed]")
     )
     return note
 
@@ -202,20 +253,22 @@ def query_node_api(endpoint: str) -> str:
 
 @tool
 def explain_concept(term: str) -> str:
-    """Explain a GHOSTDAG/PHANTOM/consensus term using the project's own
-    vocabulary (see SYSTEM_PROMPT.md glossary), grounded in the indexed docs.
+    """Explain a GHOSTDAG/PHANTOM/consensus/RFC/tokenomics term using the
+    project's own vocabulary (see SYSTEM_PROMPT.md glossary), grounded in
+    both the indexed code and the Kovanica skill's reference docs.
     """
-    results = search_codebase.invoke({"query": f"definition and usage of {term}"})
+    code_results = search_codebase.invoke({"query": f"definition and usage of {term}"})
+    doc_results = search_kovanica_docs.invoke({"query": f"definition and usage of {term}"})
     preamble = (
-        f"Below are excerpts from the Kovanica codebase that explain or "
-        f"reference **{term}**:\n\n"
+        f"Below are excerpts that explain or reference **{term}**, from the "
+        f"Kovanica codebase and the protocol's skill/reference docs:\n\n"
     )
-    return preamble + results
+    return preamble + code_results + "\n\n---\n\n" + doc_results
 
 
-DEV_TOOLS = [search_codebase, read_file, run_cargo_command, git_diff_suggest,
-             query_node_api, explain_concept]
-USER_TOOLS = [search_codebase, query_node_api, explain_concept]
+DEV_TOOLS = [search_codebase, search_kovanica_docs, read_file, run_cargo_command,
+             git_diff_suggest, query_node_api, explain_concept]
+USER_TOOLS = [search_codebase, search_kovanica_docs, query_node_api, explain_concept]
 
 
 # ---------------------------------------------------------------------------
@@ -248,8 +301,8 @@ _LIVE_HINTS = (
 )
 
 _TOOL_JSON_RE = re.compile(
-    r'\{\s*"name"\s*:\s*"(search_codebase|explain_concept|query_node_api|'
-    r'read_file|run_cargo_command|git_diff_suggest)"',
+    r'\{\s*"name"\s*:\s*"(search_codebase|search_kovanica_docs|explain_concept|'
+    r'query_node_api|read_file|run_cargo_command|git_diff_suggest)"',
     re.IGNORECASE,
 )
 
@@ -285,6 +338,12 @@ def _grounding_context(question: str) -> str:
             chunks.append(found[:4500])
     except Exception as exc:
         chunks.append(f"(code search unavailable: {exc.__class__.__name__})")
+    try:
+        found_docs = _rag_search_kovanica_docs(question, k=3)
+        if found_docs:
+            chunks.append(found_docs[:3500])
+    except Exception as exc:
+        chunks.append(f"(skill docs search unavailable: {exc.__class__.__name__})")
     q = (question or "").lower()
     if any(h in q for h in _LIVE_HINTS):
         try:
@@ -303,7 +362,6 @@ def router(state: AgentState) -> AgentState:
     # `role` must already be set by main.py from the authenticated caller
     # (JWT/Keycloak claim), not inferred here from message content.
     return state
-
 
 def agent_node(state: AgentState) -> AgentState:
     role = state.get("role") or "user"
@@ -348,7 +406,6 @@ def agent_node(state: AgentState) -> AgentState:
 
     return {"messages": [response]}
 
-
 def tools_node(state: AgentState) -> AgentState:
     """Execute tool calls with the role-appropriate tool set.
 
@@ -356,10 +413,8 @@ def tools_node(state: AgentState) -> AgentState:
     a privileged tool name actually run it. Bind the node to USER_TOOLS when
     role != dev so cargo / read_file / git_diff_suggest are unreachable.
     """
-    from langgraph.prebuilt import ToolNode
     tools = DEV_TOOLS if state.get("role") == "dev" else USER_TOOLS
     return ToolNode(tools).invoke(state)
-
 
 def human_gate(state: AgentState) -> AgentState:
     """Reached only when the agent called git_diff_suggest. Graph execution
@@ -372,7 +427,6 @@ def human_gate(state: AgentState) -> AgentState:
         "queued_at": time.time(),
     }
     return state
-
 
 def should_continue(state: AgentState) -> str:
     last = state["messages"][-1]

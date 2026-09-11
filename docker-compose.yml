@@ -39,6 +39,8 @@ services:
     environment:
       - VLLM_BASE_URL=http://vllm:8000/v1
       - QDRANT_URL=http://qdrant:6333
+      - SEARCH_AGENT_URL=http://search-agent:8082
+      - APPLY_AGENT_URL=http://apply-agent:8083
       - SANDBOX_IMAGE=kovanica-sandbox:latest
       - SANDBOX_RUNNER_URL=http://sandbox-runner:8081
       - SANDBOX_RUNNER_TOKEN=${SANDBOX_RUNNER_TOKEN:-}
@@ -58,11 +60,11 @@ services:
       - AUTH_AUDIENCE=${AUTH_AUDIENCE:-}
       - AUTH_DEV_ROLES=${AUTH_DEV_ROLES:-}
       - AUTH_DEV_TOKEN=${AUTH_DEV_TOKEN:-}
-      # Apply -> draft PR path (agent/apply.py). Fail-closed: unless
-      # AGENT_GIT_APPLY_ENABLED=1, /confirm only validates and reports
-      # (dry_run). AGENT_GIT_REPO should point at a read-only clone when the
-      # container cannot see the host checkout; set a git/gh identity + gh
-      # auth before arming.
+      # Apply -> draft PR path. Fail-closed: unless AGENT_GIT_APPLY_ENABLED=1
+      # the apply-agent only validates and reports (dry_run).
+      # AGENT_GIT_REPO should point at a read-only clone when the container
+      # cannot see the host checkout; set a git/gh identity + gh auth before
+      # arming.
       - AGENT_GIT_APPLY_ENABLED=${AGENT_GIT_APPLY_ENABLED:-}
       - AGENT_GIT_DRY_RUN=${AGENT_GIT_DRY_RUN:-1}
       - AGENT_GIT_BASE=${AGENT_GIT_BASE:-main}
@@ -72,6 +74,10 @@ services:
     volumes:
       - ./repos:/repos:ro
       - agent-data:/data   # persistent SQLite checkpoint + audit state
+      # gh CLI auth for the apply→PR path (AGENT_GIT_APPLY_ENABLED=1).
+      # Mounted read-only so the container can create draft PRs using the
+      # host's GitHub token without the token living inside the image.
+      - /root/.config/gh:/root/.config/gh:ro
     # SECURITY: agent-api does NOT mount /var/run/docker.sock (that would be
     # effective root on the host). Sandbox containers are spawned exclusively
     # by the scoped sandbox-runner sidecar, which agent-api talks to over HTTP
@@ -81,9 +87,64 @@ services:
       - vllm
       - qdrant
       - sandbox-runner
+      - search-agent
+      - apply-agent
     ports:
       - "127.0.0.1:8080:8080"
     restart: unless-stopped
+
+  # search-agent: dedicated semantic-search subagent. Owns Qdrant + the
+  # embedder + the two search collections (codebase, skill-docs). The
+  # orchestrator (agent-api) calls it over HTTP instead of importing rag.py
+  # directly. Internal-only (no host port) — the public surface is the
+  # orchestrator's /chat / /confirm, with search folded into answers.
+  search-agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - EMBED_MODULE=embed
+    volumes:
+      - ./repos:/repos:ro
+    depends_on:
+      - qdrant
+    # internal-only: no host port published
+    restart: unless-stopped
+    # Run the search-agent service module, not the orchestrator's main:app.
+    command: ["uvicorn", "search_agent:app", "--host", "0.0.0.0", "--port", "8082"]
+
+  # apply-agent: dedicated safe-apply subagent. Owns the git worktree/PR
+  # path (validate, apply, commit, push, gh draft-PR). Called by the
+  # orchestrator on /confirm approval. Internal-only — never exposed to the
+  # public internet. Fail-closed behind AGENT_GIT_APPLY_ENABLED=1.
+  apply-agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - REPOS_PATH=/repos/kovanica-protocol
+      - AGENT_GIT_APPLY_ENABLED=${AGENT_GIT_APPLY_ENABLED:-}
+      - AGENT_GIT_DRY_RUN=${AGENT_GIT_DRY_RUN:-1}
+      - AGENT_GIT_BASE=${AGENT_GIT_BASE:-main}
+      - AGENT_GIT_REPO=${AGENT_GIT_REPO:-/repos/kovanica-protocol}
+      - AGENT_GIT_REMOTE=${AGENT_GIT_REMOTE:-origin}
+      - AGENT_GH_BIN=${AGENT_GH_BIN:-gh}
+    volumes:
+      - ./repos:/repos:ro
+      - /root/.config/gh:/root/.config/gh:ro
+    depends_on:
+      - sandbox-runner
+    # internal-only: no host port published
+    restart: unless-stopped
+    # Run the apply-agent service module, not the orchestrator's main:app.
+    command: ["uvicorn", "apply_agent:app", "--host", "0.0.0.0", "--port", "8083"]
 
   # sandbox-runner is the ONLY service that mounts the Docker socket. It owns
   # all container spawning and exposes a single restricted endpoint, POST /run

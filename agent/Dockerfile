@@ -5,6 +5,10 @@ FROM python:3.12-slim
 # image or every real apply attempt fails with "command not found" even
 # after auth + AGENT_GIT_REPO are correctly configured. Both stay inert
 # (never invoked) while the apply path is disabled, which is the default.
+#
+# The container also needs a git identity for commits (author/committer).
+# Bake a bot identity here; the operator can override per-deployment with
+# a custom Dockerfile or by mounting ~/.gitconfig.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
@@ -15,7 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
        > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y --no-install-recommends gh \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && git config --global user.name "Kovi Agent" \
+    && git config --global user.email "kovi@kovanica.online"
 
 WORKDIR /app
 

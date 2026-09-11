@@ -96,7 +96,7 @@ def run_cargo(payload: dict) -> dict:
             detach=False,
             stdout=True,
             stderr=True,
-            # runtime="runsc",        # uncomment once gVisor is installed on the host
+            runtime="runsc",        # gVisor installed on host; uncommented 2026-09-11
         )
         return {"status": "ok", "body": result.decode("utf-8", errors="replace")}
     except docker.errors.ContainerError as e:
