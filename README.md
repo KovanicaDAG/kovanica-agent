@@ -50,6 +50,143 @@ docker exec kovanica-agent-agent-api-1 python /app/indexer.py \
 # --repo and --skill-docs can also be combined in one invocation.
 ```
 
+## How to use Kovi to actually code
+
+Kovi is a coding assistant that **reads your repo first** and **proposes patches
+second**. The loop is: ask → Kovi searches the codebase → Kovi answers with file
+citations → (optionally) Kovi proposes a `git_diff_suggest` patch → you
+review → `/confirm` applies it to a throwaway worktree (and, when armed, opens a
+draft PR). You never give Kovi a shell, and Kovi never pushes to your main branch
+directly.
+
+### One-time setup: the dev token
+
+`/confirm` (and therefore patch approval) requires the `dev` role. Copy
+`.env.example` → `.env` and generate a shared-secret bearer token:
+
+```bash
+cp .env.example .env
+openssl rand -hex 24   # paste the result into AUTH_DEV_TOKEN= in .env
+```
+
+`docker compose` reads `.env` automatically. A request that carries
+`Authorization: Bearer <that token>` maps to `dev`; everything else maps to
+`user`. Without a real token set, everyone is `user` (read-only tools) — safe by
+default.
+
+### The actual coding loop
+
+**Chat with Kovi** via `POST /chat`. Carry a stable `session_id` so the
+conversation persists across restarts (SQLite checkpoint, `agent-data` volume).
+Example with `curl`:
+
+```bash
+# user role (no token): read-only tools — code search, skill-docs search, node API
+curl -s -X POST http://localhost:13080/chat \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"sess-1","message":"how is GHOSTDAG selection implemented"}'
+
+# dev role (your AUTH_DEV_TOKEN): full tool set — also git_diff_suggest, run_cargo
+TOKEN="d1acc8370cd74fc94b2c2464cd004409d76f4a9ebd7fc719"
+curl -s -X POST http://localhost:13080/chat \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"session_id":"sess-1","message":"..." }'
+```
+
+**What Kovi does with your message:**
+
+1. It runs `search_codebase` over the indexed repo (Qdrant `kovanica_codebase`)
+   and, when relevant, `search_kovanica_docs` over the skill's RFCs/tokenomics/
+   GHOSTDAG notes. This is the RAG step — Kovi reads before it answers.
+2. It builds a system prompt from `SYSTEM_PROMPT.md` plus the retrieved context,
+   then calls the LLM.
+3. It returns prose with **file-path citations** from the retrieved context. It
+   does not invent paths. If you ask about something not in the index, it says so
+   rather than hallucinating a crate.
+
+**Prompts that work** (grounded, repo-shaped, concrete):
+
+- "How is `selected_parent` / blue-work computed in `kovanica-dag`?"
+- "Find the fee-floor logic and show me the current value for height N."
+- "Where are Ed25519 signatures constructed and submitted in the client path?"
+- "This function in `kovanica-state` looks O(n^2) — suggest a fix and cite the file."
+- "Add a `--verbose` flag to this CLI subcommand and show me the diff."
+- "Explain RFC-006 emission curve and the MAX_SUPPLY hard cap."
+
+**Prompts that don't work well:** vague ones ("make the code better"), requests
+that depend on files not yet indexed, and anything that requires Kovi to read your
+local files outside the repo mount.
+
+### Proposing and applying patches (dev role)
+
+When you ask Kovi to change code, it can call `git_diff_suggest` (dev role only).
+That tool:
+
+- reads the relevant files from the read-only repo mount,
+- produces a unified diff + short explanation + the file path,
+- stores the proposal in the SQLite `patchstore` under your `session_id`.
+
+You then call `POST /confirm` with your dev token and the proposal:
+
+```bash
+curl -s -X POST http://localhost:13080/confirm \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"session_id":"sess-1","approve":true}'
+```
+
+What `/confirm` actually does (fail-closed by default):
+
+- **Validates** every proposed path (rejects absolute paths, `..`, and git metadata
+  paths) and every patch (`git apply --check`).
+- **Applies** the validated patches to a **throwaway git worktree** branched off
+  `origin/main` — it never mutates the main checkout.
+- **Optionally** commits, pushes, and opens a **draft PR** via `gh` — but only when
+  `AGENT_GIT_APPLY_ENABLED=1` is set and the container has a git identity + `gh`
+  auth. Until then `/confirm` returns a `dry_run` report only. `AGENT_GIT_DRY_RUN=1`
+  forces validate-only even when enabled.
+
+You review the applied patches in the throwaway worktree (or the draft PR) before
+merging. Kovi does not merge anything.
+
+### Letting Kovi verify with the sandbox
+
+Kovi's `run_cargo_command` tool runs `cargo check|test|clippy|build` inside an
+ephemeral, network-disabled sandbox container. Use it to answer "does this
+compile?" and "are the tests green?" without giving Kovi a shell. Only those four
+commands are whitelisted, both client-side (`sandbox_client.py`) and server-side
+(`sandbox/runner/server.py`), so a compromised agent-api can never drive arbitrary
+containers.
+
+### Iterate
+
+If a patch is off, tell Kovi what to change in the same session and re-prompt.
+The retrieved context and checkpoint carry over, so Kovi can refine the proposal in
+place. If it keeps going in the wrong direction, reject at `/confirm` and start a
+fresh `session_id`.
+
+### What Kovi cannot do (boundaries)
+
+- No arbitrary shell. Only the four whitelisted `cargo` commands, inside a
+  network-disabled sandbox.
+- No pushing to your main branch. Only throwaway worktrees + (optionally) draft
+  PRs from `/confirm`, and only when you arm `AGENT_GIT_APPLY_ENABLED=1`.
+- No reading your local files outside the repo mount. It only sees what the index
+  + the read-only repo bind give it.
+- No tool-call JSON in the chat reply. The HTTP interface is prose/JSON, not a
+  tool-execution surface — tool calls happen server-side inside the graph.
+
+### Roles at a glance
+
+| Role | How you get it | Tools available |
+|------|----------------|-----------------|
+| `user` | no token, or wrong token | `search_codebase`, `search_kovanica_docs`, `query_node_api` (read-only) |
+| `dev` | `Authorization: Bearer <AUTH_DEV_TOKEN>` | everything above + `git_diff_suggest`, `run_cargo_command`, `read_file` |
+
+The live `/healthz` tells you the stack is up:
+`curl -s http://localhost:13080/healthz` → `{"status":"ok","name":"kovi"}`.
+
 Kovi UI:     http://localhost:13080  (GPU: :8080) — also https://kovi.kovanica.online
 Agent API:   POST /chat  and  POST /confirm
 Open WebUI:  operator profile only (`--profile operator`), loopback :13000 / :3000
@@ -69,12 +206,11 @@ whitelisted cargo command to the sidecar:
 
 ```
 agent-api ──POST /run──▶ sandbox-runner (owns docker.sock) ──spawn──▶ kovanica-sandbox:latest
-   (sandbox_client.py)    (sandbox/runner/server.py)          network_disabled, --rm, 2g/2CPU, user=sandbox
+  (sandbox_client.py)    (sandbox/runner/server.py)          network_disabled, --rm, 2g/2CPU, user=sandbox
 ```
 
 - `agent-api` sets `SANDBOX_RUNNER_URL=http://sandbox-runner:8081` and calls
-  `sandbox_client.run_cargo(command, args, repo_path)`
-  (`agent/sandbox_client.py`).
+  `sandbox_client.run_cargo(command, args, repo_path)` (`agent/sandbox_client.py`).
 - `sandbox-runner` (`sandbox/runner/server.py`) re-enforces the cargo whitelist
   (`check|test|clippy|build`) and the suspicious-arg filter *server-side*,
   defensively, even though `sandbox/entrypoint.sh` also enforces them inside
@@ -131,6 +267,7 @@ agent-api ──POST /run──▶ sandbox-runner (owns docker.sock) ──spawn
   `AGENT_GH_BIN` (default `gh`).
 
 ## Before this touches anything beyond your own machine
+
 - [x] Public UI + nginx vhost for `kovi.kovanica.online` (loopback-only compose ports).
 - [x] Index the repo once the stack is up: `deploy/vps-up.sh` does this on first run. Re-run `python -m indexer --repo /repos/kovanica-protocol` on merge.
 - [x] Pre-vendor crate deps into the sandbox image at build time
@@ -138,18 +275,19 @@ agent-api ──POST /run──▶ sandbox-runner (owns docker.sock) ──spawn
       `docker compose --profile build-only build sandbox-image` (context is
       the repo root, not `sandbox/`, so the crate manifests resolve).
 - [x] `sandbox-runner` API token (`SANDBOX_RUNNER_TOKEN`) — generated by `vps-up.sh`.
-- [ ] Install gVisor (`runsc`) on the host and uncomment `runtime="runsc"`
+- [x] gVisor (`runsc`) installed on the host and `runtime="runsc"` uncommented
       in `sandbox/runner/server.py` (the Docker-socket-owning sidecar is now
       the single place to set the sandbox runtime).
-- [ ] Set real auth before arming `/confirm` for anyone but you: `AUTH_JWKS_URL` +
+- [x] Real auth before arming `/confirm` for anyone but you: `AUTH_JWKS_URL` +
       `AUTH_ISSUER`/`AUTH_AUDIENCE`/`AUTH_DEV_ROLES` (Keycloak) or a strong
       `AUTH_DEV_TOKEN`. Without it everyone is `user` (safe by default).
-- [ ] Arm the apply→PR path for a real repo: give the agent-api container a git
+- [x] Arm the apply→PR path for a real repo: give the agent-api container a git
       identity + `gh` auth, set `AGENT_GIT_REPO` (or a read-only clone) and
       `AGENT_GIT_APPLY_ENABLED=1`. Until then `/confirm` returns a `dry_run`
       report only (safe by default).
 
 ## Layout
+
 ```
 docker-compose.yml       full stack wiring (docker.sock owned by sandbox-runner only)
 docker-compose.cpu.yml   VPS / no-GPU override (Ollama, loopback :13080)
