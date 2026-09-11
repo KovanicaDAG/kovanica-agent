@@ -10,3 +10,4 @@ data/
 # Secrets and local clones
 .env
 repos/
+venv/
