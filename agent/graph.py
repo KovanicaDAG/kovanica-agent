@@ -69,9 +69,11 @@ def _env(name: str, default: str = "") -> str:
 
 
 def _resolve_llm() -> ChatOpenAI:
-    """Pick the OpenAI-compatible endpoint.
+    """Pick the OpenAI-compatible LLM endpoint.
 
-    Precedence:
+    The LLM is an external inference service speaking the OpenAI chat-completions
+    protocol. Kovi selects and talks to it; Kovi itself provides the agent layer
+    (tool use, graph, RAG, sandbox). Precedence:
       1. LLM_BASE_URL (+ LLM_API_KEY / XAI_API_KEY / OPENAI_API_KEY)
       2. VLLM_BASE_URL (compose: vLLM on GPU, Ollama on CPU)
     """
@@ -80,7 +82,7 @@ def _resolve_llm() -> ChatOpenAI:
     key = _env("LLM_API_KEY") or _env("XAI_API_KEY") or _env("OPENAI_API_KEY") or "not-needed"
     if explicit_base:
         base = explicit_base
-        default_model = "grok-4" if "x.ai" in explicit_base else "qwen2.5-coder:3b"
+        default_model = "xai-grok" if "x.ai" in explicit_base else "qwen2.5-coder:3b"
     else:
         base = vllm_base
         default_model = "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ"
