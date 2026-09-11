@@ -82,7 +82,7 @@ def _resolve_llm() -> ChatOpenAI:
     key = _env("LLM_API_KEY") or _env("XAI_API_KEY") or _env("OPENAI_API_KEY") or "not-needed"
     if explicit_base:
         base = explicit_base
-        default_model = "xai-grok" if "x.ai" in explicit_base else "qwen2.5-coder:3b"
+        default_model = "qwen2.5-coder:3b"
     else:
         base = vllm_base
         default_model = "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ"
