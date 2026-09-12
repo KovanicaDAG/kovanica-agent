@@ -220,6 +220,7 @@ def readyz() -> dict:
     "/chat",
     ChatRequest,
     summary="Send a message and get the agent's response",
+    require_dev=True,
 )
 async def chat(
     req: ChatRequest,
