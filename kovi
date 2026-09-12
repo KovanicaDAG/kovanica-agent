@@ -157,6 +157,27 @@ try:
 except ImportError:
     _sidecar_run_cargo = None
 
+try:
+    sys.path.insert(0, str(AGENT_DIR / "agent"))
+    from kovi_sdk import KoviClient
+except ImportError:
+    KoviClient = None
+
+
+def _get_api_client(timeout: int = 60) -> KoviClient | None:
+    """Return a KoviClient for the remote agent-api, or None if unconfigured."""
+    if KoviClient is None:
+        return None
+    api_url = _env("KOVI_API_URL") or ""
+    if not api_url:
+        return None
+    return KoviClient(
+        base_url=api_url,
+        timeout=timeout,
+        search_agent_url=_env("SEARCH_AGENT_URL"),
+        apply_agent_url=_env("APPLY_AGENT_URL"),
+    )
+
 
 def search_codebase(query: str) -> str:
     """Semantic + keyword search over the indexed Kovanica codebase.
@@ -567,14 +588,20 @@ examples:
     p_chat.add_argument("message", nargs="+", help="Message to the agent")
     p_chat.add_argument("--session", default="cli-default", help="Session ID")
     p_chat.add_argument("--role", choices=["dev", "user"], default="dev", help="Role (dev = full tools)")
+    p_chat.add_argument("--api", action="store_true", default=False,
+                        help="Delegate to the agent-api server (KOVI_API_URL) instead of local LLM")
 
     # explain
     p_explain = sub.add_parser("explain", help="Explain a protocol term")
     p_explain.add_argument("term", help="Term to explain (e.g. mergeset, blue_score)")
+    p_explain.add_argument("--api", action="store_true", default=False,
+                           help="Delegate to the agent-api server (KOVI_API_URL)")
 
     # search
     p_search = sub.add_parser("search", help="Search the codebase")
     p_search.add_argument("query", help="Search query")
+    p_search.add_argument("--api", action="store_true", default=False,
+                          help="Delegate to the agent-api server (KOVI_API_URL)")
 
     # read
     p_read = sub.add_parser("read", help="Read a file from the repo")
@@ -601,24 +628,101 @@ examples:
     p_node = sub.add_parser("node", help="Query the read-only node RPC")
     p_node.add_argument("endpoint", help="API endpoint (e.g. /api/head)")
 
+    # health — agent-api liveness
+    p_health = sub.add_parser("health", help="Check agent-api /healthz (remote or local)")
+    p_health.add_argument("--api", action="store_true", default=False,
+                          help="Query the agent-api server (KOVI_API_URL)")
+
+    # ready — agent-api dependency probe
+    p_ready = sub.add_parser("ready", help="Check agent-api /readyz (remote or local)")
+    p_ready.add_argument("--api", action="store_true", default=False,
+                         help="Query the agent-api server (KOVI_API_URL)")
+
+    # confirm — approve/reject a pending diff proposal (dev role)
+    p_confirm = sub.add_parser("confirm", help="Approve or reject a pending diff proposal (dev role)")
+    p_confirm.add_argument("session_id", help="Session ID from the pending /chat response")
+    p_confirm.add_argument("--approve", action="store_true", default=True,
+                           help="Approve the proposal (default); use --reject to discard")
+    p_confirm.add_argument("--reject", action="store_true", default=False,
+                           help="Discard the proposal without applying")
+    p_confirm.add_argument("--api", action="store_true", default=False,
+                           help="Use the agent-api server (KOVI_API_URL); required for remote confirm")
+
     args = parser.parse_args()
 
     if args.command is None:
+        # Banner-only: user typed `kovi-cli` with no subcommand
+        print("Kovi by Projekt Kovanica ~Kovanica protocol")
         parser.print_help()
         sys.exit(0)
 
     if args.command == "chat":
         message = " ".join(args.message)
-        reply = chat(message, session_id=args.session, role=args.role)
-        print(reply)
+        if args.api or _env("KOVI_API_URL"):
+            token = _env("KOVI_API_TOKEN") or _env("AUTH_DEV_TOKEN") or None
+            client = _get_api_client(timeout=60)
+            if client is None:
+                print("ERROR: KOVI_API_URL not set and no --api delegation available", file=sys.stderr)
+                sys.exit(1)
+            if token:
+                client = KoviClient(base_url=_env("KOVI_API_URL"), token=token,
+                                     search_agent_url=_env("SEARCH_AGENT_URL"),
+                                     apply_agent_url=_env("APPLY_AGENT_URL"),
+                                     timeout=60)
+            reply_obj = client.chat(args.session, message)
+            print(reply_obj.reply or reply_obj.detail or "(no reply)")
+        else:
+            reply = chat(message, session_id=args.session, role=args.role)
+            print(reply)
 
     elif args.command == "explain":
-        reply = explain_concept(args.term)
-        print(reply)
+        term = args.term
+        if args.api or _env("KOVI_API_URL"):
+            token = _env("KOVI_API_TOKEN") or None
+            client = _get_api_client()
+            if client is None:
+                print("ERROR: KOVI_API_URL not set and no --api delegation available", file=sys.stderr)
+                sys.exit(1)
+            if token:
+                client = KoviClient(base_url=_env("KOVI_API_URL"), token=token,
+                                     search_agent_url=_env("SEARCH_AGENT_URL"),
+                                     apply_agent_url=_env("APPLY_AGENT_URL"))
+            reply_obj = client.explain(term)
+            if reply_obj.is_error:
+                print(f"ERROR: {reply_obj.error}", file=sys.stderr)
+                sys.exit(1)
+            print(reply_obj.explanation or "(no explanation)")
+        else:
+            reply = explain_concept(term)
+            print(reply)
 
     elif args.command == "search":
-        reply = search_codebase(args.query)
-        print(reply)
+        query = args.query
+        if args.api or _env("KOVI_API_URL"):
+            token = _env("KOVI_API_TOKEN") or None
+            client = _get_api_client()
+            if client is None:
+                print("ERROR: KOVI_API_URL not set and no --api delegation available", file=sys.stderr)
+                sys.exit(1)
+            if token:
+                client = KoviClient(base_url=_env("KOVI_API_URL"), token=token,
+                                     search_agent_url=_env("SEARCH_AGENT_URL"),
+                                     apply_agent_url=_env("APPLY_AGENT_URL"))
+            reply_obj = client.search(query)
+            if reply_obj.is_error:
+                print(f"ERROR: {reply_obj.error}", file=sys.stderr)
+                sys.exit(1)
+            if reply_obj.code:
+                print("-- code --")
+                print(reply_obj.code)
+            if reply_obj.docs:
+                print("-- docs --")
+                print(reply_obj.docs)
+            if not reply_obj.code and not reply_obj.docs:
+                print("(no results)")
+        else:
+            reply = search_codebase(query)
+            print(reply)
 
     elif args.command == "read":
         reply = read_file(args.path, args.start, args.end)
@@ -639,6 +743,63 @@ examples:
     elif args.command == "node":
         reply = query_node_api(args.endpoint)
         print(reply)
+
+    elif args.command == "health":
+        if args.api or _env("KOVI_API_URL"):
+            token = _env("KOVI_API_TOKEN") or None
+            client = _get_api_client(timeout=10)
+            if client is None:
+                print("ERROR: KOVI_API_URL not set", file=sys.stderr)
+                sys.exit(1)
+            if token:
+                client = KoviClient(base_url=_env("KOVI_API_URL"), token=token,
+                                     search_agent_url=_env("SEARCH_AGENT_URL"),
+                                     apply_agent_url=_env("APPLY_AGENT_URL"),
+                                     timeout=10)
+            data = client.healthz()
+            print(json.dumps(data, indent=2))
+        else:
+            print(json.dumps({"status": "ok", "name": "kovi", "mode": "local"}, indent=2))
+
+    elif args.command == "ready":
+        if args.api or _env("KOVI_API_URL"):
+            token = _env("KOVI_API_TOKEN") or None
+            client = _get_api_client(timeout=10)
+            if client is None:
+                print("ERROR: KOVI_API_URL not set", file=sys.stderr)
+                sys.exit(1)
+            if token:
+                client = KoviClient(base_url=_env("KOVI_API_URL"), token=token,
+                                     search_agent_url=_env("SEARCH_AGENT_URL"),
+                                     apply_agent_url=_env("APPLY_AGENT_URL"),
+                                     timeout=10)
+            data = client.readyz()
+            print(json.dumps(data, indent=2))
+        else:
+            print(json.dumps({"status": "ok", "name": "kovi", "mode": "local"}, indent=2))
+
+    elif args.command == "confirm":
+        api_url = _env("KOVI_API_URL") or ""
+        if not api_url:
+            print("ERROR: KOVI_API_URL is required for `kovi confirm`", file=sys.stderr)
+            sys.exit(1)
+        token = _env("KOVI_API_TOKEN") or None
+        if not token:
+            print("ERROR: KOVI_API_TOKEN is required for `kovi confirm` (dev role)", file=sys.stderr)
+            sys.exit(1)
+        client = KoviClient(base_url=api_url, token=token,
+                             search_agent_url=_env("SEARCH_AGENT_URL"),
+                             apply_agent_url=_env("APPLY_AGENT_URL"))
+        approve = (args.approve and not args.reject)
+        reply_obj = client.confirm(args.session_id, approve)
+        print(json.dumps({
+            "status": reply_obj.status,
+            "reply": reply_obj.reply,
+            "detail": reply_obj.detail,
+            "applied_files": reply_obj.applied_files,
+            "branch": reply_obj.branch,
+            "pr_url": reply_obj.pr_url,
+        }, indent=2))
 
 
 if __name__ == "__main__":
