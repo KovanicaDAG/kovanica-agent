@@ -2,6 +2,10 @@
 
 > Single-file export of the full skill for use with any agent.
 > Generated for offline / cross-agent use. Prefer live /api/head values over any cached numbers.
+>
+> **Split mode (2026-09-12):** This monolithic file is now split into per-skill files under
+> `skills/<skill-name>/SKILL.md`. The entry point is `skills/kovanica-blockchain-developer/SKILL.md`.
+> For agent brain / memory / snapshots, see the Obsidian-compatible vault at `markdown-vault/`.
 
 ---
 
