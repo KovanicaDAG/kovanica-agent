@@ -293,13 +293,14 @@ docker-compose.yml       full stack wiring (docker.sock owned by sandbox-runner 
 docker-compose.cpu.yml   VPS / no-GPU override (Ollama, loopback :13080)
 deploy/                  nginx vhost + vps-up.sh
 SYSTEM_PROMPT.md          agent's system prompt (vocab, citation rule, safety rules)
-sandbox/
-  Dockerfile              ephemeral cargo exec environment
-  entrypoint.sh           whitelist enforcement inside the container
-  runner/
-    Dockerfile            sandbox-runner sidecar image (owns docker.sock)
-    server.py             POST /run: whitelist + spawn sandbox container
-    requirements.txt      docker SDK for the sidecar
+## Layout
+
+```
+docker-compose.yml       full stack wiring (docker.sock owned by sandbox-runner only)
+docker-compose.cpu.yml   VPS / no-GPU override (Ollama, loopback :13080)
+deploy/                  nginx vhost + vps-up.sh
+KOVANICA.md              Kovi agent workspace guide (tool surface, safety, conventions)
+SYSTEM_PROMPT.md         agent's system prompt (vocab, citation rule, safety rules)
 agent/
   Dockerfile
   requirements.txt
@@ -312,4 +313,13 @@ agent/
   embed.py                fastembed wrapper (bge-small-en-v1.5)
   checkpoint.py           SQLite persistent LangGraph checkpointer
   sandbox_client.py       run_cargo(command, args, repo_path) -> sidecar
+  tools_ext.py            NEW: glob, grep, edit, write, bash, task, session, memory (Claude Code/Codex-style)
+  kovi_sdk.py            KoviClient: typed HTTP client for the agent API
+sandbox/
+  Dockerfile              ephemeral cargo exec environment
+  entrypoint.sh           whitelist enforcement inside the container
+  runner/
+    Dockerfile            sandbox-runner sidecar image (owns docker.sock)
+    server.py             POST /run: whitelist + spawn sandbox container
+    requirements.txt      docker SDK for the sidecar
 ```

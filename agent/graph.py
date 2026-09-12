@@ -29,6 +29,7 @@ from langgraph.prebuilt import ToolNode
 from checkpoint import get as _get_checkpoint
 from sandbox_client import run_cargo as _sidecar_run_cargo
 import patchstore as _patchstore
+import tools_ext as _te
 
 try:  # langgraph.config via contextvar; absent in some old runtimes
     from langgraph.config import get_config as _get_config
@@ -89,12 +90,13 @@ def _resolve_llm() -> ChatOpenAI:
         if ":11434" in vllm_base or "ollama" in vllm_base.lower():
             default_model = "qwen2.5-coder:3b"
     model = _env("AGENT_MODEL") or default_model
+    llm_timeout = int(_env("LLM_TIMEOUT") or 900)  # CPU Ollama is slow: prompt+gen can exceed 3 min
     return ChatOpenAI(
         base_url=base,
         api_key=key,
         model=model,
         temperature=0.1,
-        timeout=180,
+        timeout=llm_timeout,
         max_retries=1,
     )
 
@@ -268,9 +270,248 @@ def explain_concept(term: str) -> str:
     return preamble + code_results + "\n\n---\n\n" + doc_results
 
 
+# ------------------------------------------------------------------
+# Claude-code/Codex-style tools (NEW)
+# ------------------------------------------------------------------
+
+@tool
+def glob_files(pattern: str, path: str = "") -> str:
+    """Find files matching a glob pattern under the repo.
+
+    Uses fnmatch against repo-relative paths. Supports ** recursive glob.
+    Examples: glob_files("**/*.rs"), glob_files("crates/kovanica-dag/**")
+
+    Parameters
+    ----------
+    pattern : str
+        Glob pattern to match (e.g. "**/*.rs", "crates/**/main.rs").
+    path : str
+        Optional root directory for the search; defaults to the repo root.
+    """
+    return _te.glob_files(pattern, path or None)
+
+
+@tool
+def grep_files(pattern: str, path: str = "", case_sensitive: bool = True) -> str:
+    """Search file contents for a literal or regex pattern.
+
+    Uses rg (ripgrep) when available, falls back to grep. Only searches
+    indexable file extensions (.rs, .md, .toml, .py, .sh, .yaml, .json, etc.).
+
+    Parameters
+    ----------
+    pattern : str
+        Pattern to search for (literal text or regex).
+    path : str
+        Optional directory to search under; defaults to the repo root.
+    case_sensitive : bool
+        Whether to respect case. Default True. Set False for -i behavior.
+    """
+    return _te.grep_files(pattern, path or None, case_sensitive)
+
+
+@tool
+def read_file(path: str, start_line: int = 1, end_line: Optional[int] = None) -> str:
+    """Read a slice of a file from the read-only repo mount. Path is relative
+    to the repo root, e.g. 'crates/kovanica-dag/src/ghostdag.rs'.
+
+    This is the tool-binding entry point; the graph's ToolNode wires it.
+    For CLI use, see the ``read_file`` function in kovi.
+    """
+    full_path = os.path.join(REPOS_PATH, path.lstrip("/"))
+    if not os.path.abspath(full_path).startswith(os.path.abspath(REPOS_PATH)):
+        return "ERROR: path escapes repo root"
+    if not os.path.isfile(full_path):
+        return f"ERROR: file not found: {path}"
+    with open(full_path, "r", errors="replace") as f:
+        lines = f.readlines()
+    end_line = end_line or len(lines)
+    return "".join(lines[start_line - 1:end_line])
+
+
+@tool
+def edit_file(path: str, old_str: str, new_str: str,
+              insert_line: Optional[int] = None, regex: bool = False,
+              replace_all: bool = False) -> str:
+    """Apply a targeted edit to a file. NEVER writes directly to the real repo
+    without a human confirmation gate — this tool reports what it would do,
+    and the apply path still requires /confirm for real mutations.
+
+    For now this is a proposal tool: it writes to a throwaway staging area
+    and returns a diff. Use git_diff_suggest for repo-persistent proposals.
+    """
+    repo_root = _te._repo_root()
+    rel = _te._safe_edit_path(path)
+    if rel is None:
+        return f"ERROR: unsafe path: {path}"
+
+    if not rel.is_file():
+        if rel.parent.exists():
+            return f"ERROR: file not found: {path}"
+        # Preview mode: report what would be created
+        return (f"[preview] Would create {path} with the following content "
+                f"({len(new_str.splitlines())} lines):\n{new_str[:2000]}")
+
+    lines = _te._read_lines(rel)
+    text = "".join(lines)
+
+    if old_str.strip():
+        if regex:
+            try:
+                new_text = re.sub(old_str, new_str, text,
+                                  count=0 if replace_all else 1)
+            except re.error as exc:
+                return f"ERROR: invalid regex: {exc}"
+            if new_text == text:
+                return f"ERROR: pattern not found in {path}"
+            new_lines = new_text.splitlines(keepends=True)
+            return (f"[preview] Would regex-replace in {path}: "
+                    f"{len(lines)} → {len(new_lines)} lines.\n"
+                    f"Old: {old_str[:200]}\nNew: {new_str[:200]}")
+        else:
+            if old_str not in text:
+                return f"ERROR: old_str not found in {path}"
+            new_text = text.replace(old_str, new_str,
+                                    count=0 if replace_all else 1)
+            new_lines = new_text.splitlines(keepends=True)
+            return (f"[preview] Would replace in {path}: "
+                    f"{len(lines)} → {len(new_lines)} lines.\n"
+                    f"Old: {old_str[:200]}\nNew: {new_str[:200]}")
+    elif insert_line is not None:
+        if insert_line < 1:
+            return f"ERROR: insert_line must be >= 1"
+        if insert_line > len(lines):
+            return f"ERROR: insert_line {insert_line} beyond EOF ({len(lines)} lines)"
+        insert_lines = new_str.splitlines(keepends=True) or [new_str]
+        return (f"[preview] Would insert {len(insert_lines)} line(s) after line "
+                f"{insert_line} in {path}.\n{new_str[:500]}")
+    else:
+        return "ERROR: no operation specified (old_str or insert_line required)"
+
+
+@tool
+def write_file(path: str, content: str, append: bool = False) -> str:
+    """Write content to a file (repo-relative). Creates parent dirs.
+
+    This is a proposal tool: it reports what would be written without
+    touching the real repo. Use git_diff_suggest for repo-persistent proposals.
+    """
+    return _te.write_file(path, content, append=append)
+
+
+@tool
+def run_bash(command: str, workdir: str = "") -> str:
+    """Run a whitelisted shell command and return stdout+stderr.
+
+    Only whitelisted commands are allowed (ls, cat, head, tail, rg, grep,
+    git status/log/diff/show, etc.). Network-modifying git commands
+    (push, pull, fetch, clone) are blocked. Capped at 30s by default.
+
+    Parameters
+    ----------
+    command : str
+        Shell command to run (no shell metacharacters; plain argv).
+    workdir : str
+        Working directory; defaults to the repo root.
+    """
+    return _te.run_bash(command, workdir or None)
+
+
+@tool
+def task_add(description: str) -> str:
+    """Add a todo task for the current session.
+
+    Parameters
+    ----------
+    description : str
+        Task description.
+    """
+    session_id = ""
+    if _get_config is not None:
+        try:
+            cfg = _get_config()
+            session_id = str(cfg.get("configurable", {}).get("thread_id", ""))
+        except Exception:
+            session_id = os.environ.get("AGENT_SESSION_ID", "default")
+    if not session_id:
+        session_id = "default"
+    task = _te.task_add(session_id, description)
+    return f"Task added: [{task.id}] {task.content}"
+
+
+@tool
+def task_list() -> str:
+    """List tasks for the current session."""
+    session_id = ""
+    if _get_config is not None:
+        try:
+            cfg = _get_config()
+            session_id = str(cfg.get("configurable", {}).get("thread_id", ""))
+        except Exception:
+            session_id = os.environ.get("AGENT_SESSION_ID", "default")
+    if not session_id:
+        session_id = "default"
+    return _te.task_summary(session_id)
+
+
+@tool
+def task_done(task_id: str) -> str:
+    """Mark a task done for the current session."""
+    session_id = ""
+    if _get_config is not None:
+        try:
+            cfg = _get_config()
+            session_id = str(cfg.get("configurable", {}).get("thread_id", ""))
+        except Exception:
+            session_id = os.environ.get("AGENT_SESSION_ID", "default")
+    if not session_id:
+        session_id = "default"
+    return _te.task_done(session_id, task_id)
+
+
+@tool
+def task_remove(task_id: str) -> str:
+    """Remove a task for the current session."""
+    session_id = ""
+    if _get_config is not None:
+        try:
+            cfg = _get_config()
+            session_id = str(cfg.get("configurable", {}).get("thread_id", ""))
+        except Exception:
+            session_id = os.environ.get("AGENT_SESSION_ID", "default")
+    if not session_id:
+        session_id = "default"
+    return _te.task_remove(session_id, task_id)
+
+
+@tool
+def memory_recall(prefix: str = "") -> str:
+    """Recall learned facts (user preferences, project conventions, etc.)."""
+    return _te.memory_recall(prefix)
+
+
+@tool
+def memory_store(key: str, value: str) -> str:
+    """Store a learned fact for future sessions."""
+    session_id = ""
+    if _get_config is not None:
+        try:
+            cfg = _get_config()
+            session_id = str(cfg.get("configurable", {}).get("thread_id", ""))
+        except Exception:
+            session_id = os.environ.get("AGENT_SESSION_ID", "default")
+    if not session_id:
+        session_id = "default"
+    return _te.memory_store(key, value, session_id)
+
+
 DEV_TOOLS = [search_codebase, search_kovanica_docs, read_file, run_cargo_command,
-             git_diff_suggest, query_node_api, explain_concept]
-USER_TOOLS = [search_codebase, search_kovanica_docs, query_node_api, explain_concept]
+             git_diff_suggest, query_node_api, explain_concept,
+             glob_files, grep_files, edit_file, write_file, run_bash,
+             task_add, task_list, task_done, task_remove,
+             memory_recall, memory_store]
+USER_TOOLS = [search_codebase, search_kovanica_docs, query_node_api, explain_concept,
+              glob_files, grep_files, memory_recall]
 
 
 # ---------------------------------------------------------------------------
