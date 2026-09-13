@@ -51,6 +51,7 @@ class TelegramGateway:
         api_token: Optional[str] = None,
         default_session: Optional[str] = None,
         allowed_users: Optional[list[int]] = None,
+        timeout: int = 180,
     ):
         """
         Initialize the Telegram gateway.
@@ -61,6 +62,7 @@ class TelegramGateway:
             api_token: Optional bearer token for dev role
             default_session: Default session ID to use
             allowed_users: List of allowed Telegram user IDs (None = allow all)
+            timeout: Request timeout in seconds (default: 180 for slow LLM responses)
         """
         self.bot_token = bot_token
         self.api_url = api_url
@@ -68,10 +70,11 @@ class TelegramGateway:
         self.default_session = default_session or "telegram-default"
         self.allowed_users = set(allowed_users) if allowed_users else None
 
-        # Initialize Kovanica SDK client
+        # Initialize Kovanica SDK client with longer timeout for LLM responses
         self.client = KovanicaClient(
             base_url=api_url,
             token=api_token,
+            timeout=timeout,
         )
 
         # Build Telegram application
@@ -267,6 +270,12 @@ Environment variables:
         help="Allowed Telegram user IDs (space-separated)",
     )
     parser.add_argument(
+        "--timeout",
+        type=int,
+        default=int(os.environ.get("KOVANICA_TIMEOUT", "180")),
+        help="Request timeout in seconds (default: 180)",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable debug logging",
@@ -286,6 +295,7 @@ Environment variables:
         api_token=args.api_token,
         default_session=args.session,
         allowed_users=args.allowed_users,
+        timeout=args.timeout,
     )
 
     try:
