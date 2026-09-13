@@ -24,7 +24,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-app = FastAPI(title="Kovi Search Agent")
+app = FastAPI(title="Kovanica Search Agent")
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "kovanica_codebase")

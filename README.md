@@ -1,12 +1,12 @@
-# Kovi — Kovanica Engineering Agent
+# Kovanica — Kovanica Engineering Agent
 
-> **Kovi, Product of Kovanica.** A RAG-powered engineering agent for the
+> **Kovanica, Product of Kovanica.** A RAG-powered engineering agent for the
 > kovanica-protocol codebase: FastAPI `/chat` + `/confirm`, LangGraph with
 > SQLite checkpoints, Qdrant/fastembed semantic codebase search, and a
 > network-disabled sandbox for `cargo` runs. It can propose patches and — when
 > armed — open draft PRs from `/confirm`.
 >
-> Public chat: **https://kovi.kovanica.online**
+> Public chat: **https://kovanica.kovanica.online**
 
 ## Build & run
 
@@ -50,13 +50,13 @@ docker exec kovanica-agent-agent-api-1 python /app/indexer.py \
 # --repo and --skill-docs can also be combined in one invocation.
 ```
 
-## How to use Kovi to actually code
+## How to use Kovanica to actually code
 
-Kovi is a coding assistant that **reads your repo first** and **proposes patches
-second**. The loop is: ask → Kovi searches the codebase → Kovi answers with file
-citations → (optionally) Kovi proposes a `git_diff_suggest` patch → you
+Kovanica is a coding assistant that **reads your repo first** and **proposes patches
+second**. The loop is: ask → Kovanica searches the codebase → Kovanica answers with file
+citations → (optionally) Kovanica proposes a `git_diff_suggest` patch → you
 review → `/confirm` applies it to a throwaway worktree (and, when armed, opens a
-draft PR). You never give Kovi a shell, and Kovi never pushes to your main branch
+draft PR). You never give Kovanica a shell, and Kovanica never pushes to your main branch
 directly.
 
 ### One-time setup: the dev token
@@ -76,7 +76,7 @@ default.
 
 ### The actual coding loop
 
-**Chat with Kovi** via `POST /chat`. Carry a stable `session_id` so the
+**Chat with Kovanica** via `POST /chat`. Carry a stable `session_id` so the
 conversation persists across restarts (SQLite checkpoint, `agent-data` volume).
 Example with `curl`:
 
@@ -94,11 +94,11 @@ curl -s -X POST http://localhost:13080/chat \
   -d '{"session_id":"sess-1","message":"..." }'
 ```
 
-**What Kovi does with your message:**
+**What Kovanica does with your message:**
 
 1. It runs `search_codebase` over the indexed repo (Qdrant `kovanica_codebase`)
    and, when relevant, `search_kovanica_docs` over the skill's RFCs/tokenomics/
-   GHOSTDAG notes. This is the RAG step — Kovi reads before it answers.
+   GHOSTDAG notes. This is the RAG step — Kovanica reads before it answers.
 2. It builds a system prompt from `SYSTEM_PROMPT.md` plus the retrieved context,
    then calls the LLM.
 3. It returns prose with **file-path citations** from the retrieved context. It
@@ -115,12 +115,12 @@ curl -s -X POST http://localhost:13080/chat \
 - "Explain RFC-006 emission curve and the MAX_SUPPLY hard cap."
 
 **Prompts that don't work well:** vague ones ("make the code better"), requests
-that depend on files not yet indexed, and anything that requires Kovi to read your
+that depend on files not yet indexed, and anything that requires Kovanica to read your
 local files outside the repo mount.
 
 ### Proposing and applying patches (dev role)
 
-When you ask Kovi to change code, it can call `git_diff_suggest` (dev role only).
+When you ask Kovanica to change code, it can call `git_diff_suggest` (dev role only).
 That tool:
 
 - reads the relevant files from the read-only repo mount,
@@ -148,25 +148,25 @@ What `/confirm` actually does (fail-closed by default):
   forces validate-only even when enabled.
 
 You review the applied patches in the throwaway worktree (or the draft PR) before
-merging. Kovi does not merge anything.
+merging. Kovanica does not merge anything.
 
-### Letting Kovi verify with the sandbox
+### Letting Kovanica verify with the sandbox
 
-Kovi's `run_cargo_command` tool runs `cargo check|test|clippy|build` inside an
+Kovanica's `run_cargo_command` tool runs `cargo check|test|clippy|build` inside an
 ephemeral, network-disabled sandbox container. Use it to answer "does this
-compile?" and "are the tests green?" without giving Kovi a shell. Only those four
+compile?" and "are the tests green?" without giving Kovanica a shell. Only those four
 commands are whitelisted, both client-side (`sandbox_client.py`) and server-side
 (`sandbox/runner/server.py`), so a compromised agent-api can never drive arbitrary
 containers.
 
 ### Iterate
 
-If a patch is off, tell Kovi what to change in the same session and re-prompt.
-The retrieved context and checkpoint carry over, so Kovi can refine the proposal in
+If a patch is off, tell Kovanica what to change in the same session and re-prompt.
+The retrieved context and checkpoint carry over, so Kovanica can refine the proposal in
 place. If it keeps going in the wrong direction, reject at `/confirm` and start a
 fresh `session_id`.
 
-### What Kovi cannot do (boundaries)
+### What Kovanica cannot do (boundaries)
 
 - No arbitrary shell. Only the four whitelisted `cargo` commands, inside a
   network-disabled sandbox.
@@ -187,7 +187,7 @@ fresh `session_id`.
 The live `/healthz` tells you the stack is up:
 `curl -s http://localhost:13080/healthz` → `{"status":"ok","name":"kovi"}`.
 
-Kovi UI:     http://localhost:13080  (GPU: :8080) — also https://kovi.kovanica.online
+Kovanica UI:     http://localhost:13080  (GPU: :8080) — also https://kovanica.kovanica.online
 Agent API:   POST /chat  and  POST /confirm
 Open WebUI:  operator profile only (`--profile operator`), loopback :13000 / :3000
 
@@ -227,7 +227,7 @@ agent-api ──POST /run──▶ sandbox-runner (owns docker.sock) ──spawn
 ## What's implemented (starting work shipped)
 
 - **Public chat UI** (`agent/static/index.html` served at `GET /`): Kovanica-branded
-  Kovi console at https://kovi.kovanica.online. `/chat` + `/confirm` + `/healthz`.
+  Kovanica console at https://kovanica.kovanica.online. `/chat` + `/confirm` + `/healthz`.
 - **VPS deploy** (`deploy/vps-up.sh` + `deploy/nginx-kovi.conf`): CPU compose,
   loopback binds, nginx vhost, first-run Ollama pull + Qdrant index.
 - **Real JWT auth** (`agent/auth.py`): JWKS mode when `AUTH_JWKS_URL` is set, or a
@@ -299,12 +299,12 @@ SYSTEM_PROMPT.md          agent's system prompt (vocab, citation rule, safety ru
 docker-compose.yml       full stack wiring (docker.sock owned by sandbox-runner only)
 docker-compose.cpu.yml   VPS / no-GPU override (Ollama, loopback :13080)
 deploy/                  nginx vhost + vps-up.sh
-KOVANICA.md              Kovi agent workspace guide (tool surface, safety, conventions)
+KOVANICA.md              Kovanica agent workspace guide (tool surface, safety, conventions)
 SYSTEM_PROMPT.md         agent's system prompt (vocab, citation rule, safety rules)
 agent/
   Dockerfile
   requirements.txt
-  static/index.html       public Kovi chat UI
+  static/index.html       public Kovanica chat UI
   main.py                 FastAPI: /, /chat, /confirm, /healthz
   auth.py                 JWT verification (JWKS or dev-token) → dev/user
   graph.py                LangGraph: router, tools, human gate
@@ -314,7 +314,7 @@ agent/
   checkpoint.py           SQLite persistent LangGraph checkpointer
   sandbox_client.py       run_cargo(command, args, repo_path) -> sidecar
   tools_ext.py            NEW: glob, grep, edit, write, bash, task, session, memory (Claude Code/Codex-style)
-  kovi_sdk.py            KoviClient: typed HTTP client for the agent API
+  kovanica_sdk.py            KovanicaClient: typed HTTP client for the agent API
 sandbox/
   Dockerfile              ephemeral cargo exec environment
   entrypoint.sh           whitelist enforcement inside the container

@@ -1,6 +1,6 @@
 """
 FastAPI entrypoint. Routes:
-  GET  /         - Kovi chat UI
+  GET  /         - Kovanica chat UI
   GET  /healthz  - liveness
   GET  /readyz   - dependency probe
   POST /chat     - send a message, get the agent's response (or a
@@ -35,7 +35,7 @@ from auth import verify_token
 from graph import build_graph
 import patchstore as _patchstore
 
-app = FastAPI(title="Kovi — Kovanica Engineering Agent")
+app = FastAPI(title="Kovanica — Kovanica Engineering Agent")
 agent_graph = build_graph()
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"

@@ -1,12 +1,12 @@
 """
-Kovi SDK — typed client for the Kovi agent API.
+Kovanica SDK — typed client for the Kovanica agent API.
 
 Consumes the orchestrator (agent-api) HTTP surface and the subagent
 search/apply services directly when they are reachable.
 
 Public surface
 --------------
-KoviClient(base_url, token=None, timeout=60)
+KovanicaClient(base_url, token=None, timeout=60)
   .chat(session_id, message)        -> ChatReply
   .confirm(session_id, approve)    -> ChatReply
   .healthz()                        -> dict
@@ -118,13 +118,13 @@ class ApplyReply:
 # ---------------------------------------------------------------------------
 
 
-class KoviClient:
-    """Typed, token-aware client for a Kovi agent instance and its subagents.
+class KovanicaClient:
+    """Typed, token-aware client for a Kovanica agent instance and its subagents.
 
     Parameters
     ----------
     base_url:
-        Base URL of the orchestrator, e.g. ``https://kovi.kovanica.online``
+        Base URL of the orchestrator, e.g. ``https://kovanica.kovanica.online``
         or ``http://localhost:13080``. A trailing slash is stripped.
     token:
         Bearer token for ``Authorization``. Optional — omit for unauthenticated
@@ -152,7 +152,7 @@ class KoviClient:
     ):
         if requests is None:
             raise RuntimeError(
-                "The Kovi SDK requires the 'requests' package. "
+                "The Kovanica SDK requires the 'requests' package. "
                 "Install it with: pip install requests"
             )
         self._base = base_url.rstrip("/")
@@ -248,7 +248,7 @@ class KoviClient:
         if not self._search_url:
             return SearchReply(
                 query=query,
-                error="search not configured: pass search_agent_url to KoviClient",
+                error="search not configured: pass search_agent_url to KovanicaClient",
             )
         try:
             r = requests.post(
@@ -281,7 +281,7 @@ class KoviClient:
         if not self._search_url:
             return ExplainReply(
                 term=term,
-                error="explain not configured: pass search_agent_url to KoviClient",
+                error="explain not configured: pass search_agent_url to KovanicaClient",
             )
         try:
             r = requests.post(
@@ -326,7 +326,7 @@ class KoviClient:
         if not self._apply_url:
             return ApplyReply(
                 status="error",
-                detail="apply not configured: pass apply_agent_url to KoviClient",
+                detail="apply not configured: pass apply_agent_url to KovanicaClient",
             )
         body = {
             "session_id": session_id,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Bring Kovi up on the Kovanica VPS (CPU compose) and point
-# kovi.kovanica.online at it. Idempotent: safe to re-run after a git pull.
+# Bring Kovanica up on the Kovanica VPS (CPU compose) and point
+# kovanica.kovanica.online at it. Idempotent: safe to re-run after a git pull.
 #
 # Expected layout on srv1745734:
 #   /root/kovanica-protocol          protocol checkout (already there)
@@ -13,7 +13,7 @@ AGENT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROTOCOL_ROOT="${KOVANICA_PROTOCOL_ROOT:-/root/kovanica-protocol}"
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.cpu.yml)
 
-echo "==> Kovi deploy from $AGENT_ROOT"
+echo "==> Kovanica deploy from $AGENT_ROOT"
 
 if [[ ! -f "$PROTOCOL_ROOT/Cargo.toml" ]]; then
   echo "error: protocol checkout not found at $PROTOCOL_ROOT" >&2
@@ -31,7 +31,7 @@ if [[ ! -f "$AGENT_ROOT/.env" ]]; then
 AUTH_DEV_TOKEN=$(openssl rand -hex 24)
 DOCKER_GID=$docker_gid
 SANDBOX_RUNNER_TOKEN=$(openssl rand -hex 16)
-CORS_ORIGINS=https://kovi.kovanica.online,https://kovanica.online,https://www.kovanica.online
+CORS_ORIGINS=https://kovanica.kovanica.online,https://kovanica.online,https://www.kovanica.online
 KOVANICA_NODE_URL=https://explorer.kovanica.online
 AGENT_GIT_DRY_RUN=1
 AGENT_MODEL=qwen2.5-coder:3b
@@ -50,23 +50,23 @@ source "$AGENT_ROOT/.env"
 set +a
 export DOCKER_GID="${DOCKER_GID:-$(stat -c %g /var/run/docker.sock 2>/dev/null || echo 988)}"
 
-echo "==> nginx vhost kovi.kovanica.online (HTTP + HTTPS)"
+echo "==> nginx vhost kovanica.kovanica.online (HTTP + HTTPS)"
 if [[ -d /etc/nginx/sites-available ]]; then
-  # If kovi was added as a server_name on the website vhost, SNI steals
+  # If kovanica was added as a server_name on the website vhost, SNI steals
   # requests. Strip it from every other site before installing ours.
   for f in /etc/nginx/sites-available/* /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*; do
     [[ -e "$f" ]] || continue
     base="$(basename "$f")"
-    [[ "$base" == "kovi.kovanica.online" ]] && continue
-    if grep -q 'kovi\.kovanica\.online' "$f" 2>/dev/null; then
-      echo "    stripping kovi.kovanica.online from $f"
-      sed -i -E 's/[[:space:]]*kovi\.kovanica\.online//g' "$f"
+    [[ "$base" == "kovanica.kovanica.online" ]] && continue
+    if grep -q 'kovanica\.kovanica\.online' "$f" 2>/dev/null; then
+      echo "    stripping kovanica.kovanica.online from $f"
+      sed -i -E 's/[[:space:]]*kovanica\.kovanica\.online//g' "$f"
     fi
   done
 
   cert=""
   key=""
-  for d in /etc/letsencrypt/live/kovi.kovanica.online \
+  for d in /etc/letsencrypt/live/kovanica.kovanica.online \
            /etc/letsencrypt/live/kovanica.online \
            /etc/letsencrypt/live/explorer.kovanica.online; do
     if [[ -f "$d/fullchain.pem" && -f "$d/privkey.pem" ]]; then
@@ -77,16 +77,16 @@ if [[ -d /etc/nginx/sites-available ]]; then
     fi
   done
   if [[ -z "$cert" ]]; then
-    echo "error: no TLS cert found under /etc/letsencrypt/live for kovi" >&2
+    echo "error: no TLS cert found under /etc/letsencrypt/live for kovanica" >&2
     ls -la /etc/letsencrypt/live || true
     exit 1
   fi
 
   sed -e "s|__SSL_CERT__|$cert|g" -e "s|__SSL_KEY__|$key|g" \
     "$AGENT_ROOT/deploy/nginx-kovi.conf" \
-    > /etc/nginx/sites-available/kovi.kovanica.online
-  ln -sfn /etc/nginx/sites-available/kovi.kovanica.online \
-    /etc/nginx/sites-enabled/kovi.kovanica.online
+    > /etc/nginx/sites-available/kovanica.kovanica.online
+  ln -sfn /etc/nginx/sites-available/kovanica.kovanica.online \
+    /etc/nginx/sites-enabled/kovanica.kovanica.online
   nginx -t
   systemctl reload nginx
 else
@@ -154,8 +154,8 @@ else
   echo "    collection already present — skip (pass --recreate manually to rebuild)"
 fi
 
-echo "==> Kovi is up"
+echo "==> Kovanica is up"
 curl -fsS http://127.0.0.1:13080/healthz
 echo
-echo "Public: https://kovi.kovanica.online"
+echo "Public: https://kovanica.kovanica.online"
 echo "Local:  http://127.0.0.1:13080"
