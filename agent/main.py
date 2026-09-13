@@ -22,9 +22,11 @@ import os
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Callable, Type
 
+import requests
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -133,15 +135,33 @@ def register_action(
     """
 
     def decorator(handler: Callable) -> Callable:
-        app.post(path, summary=summary or path)(handler)
+        if require_dev:
+            @wraps(handler)
+            async def guarded(
+                req,
+                request: Request,
+                authorization: str | None = Header(default=None),
+            ):
+                role = verify_token(authorization)
+                if role != "dev":
+                    raise HTTPException(
+                        status_code=403, detail="Only dev role may call this action"
+                    )
+                return await handler(req, request, authorization)
+
+            enforced_handler = guarded
+        else:
+            enforced_handler = handler
+
+        app.post(path, summary=summary or path)(enforced_handler)
         _ACTION_REGISTRY[path] = ActionSpec(
             path=path,
             model=model,
-            handler=handler,
+            handler=enforced_handler,
             summary=summary,
             require_dev=require_dev,
         )
-        return handler
+        return enforced_handler
 
     return decorator
 
@@ -278,9 +298,11 @@ async def confirm(
 ) -> dict:
     if not _rate_ok(_client_ip(request)):
         raise HTTPException(status_code=429, detail="Too many requests")
+    # Role is already enforced as "dev" by the require_dev wrapper in
+    # register_action(); verify_token() is called again here only to recover
+    # the role string for audit logging (cheap: token was already validated
+    # once this request, and verify_token does not mutate state).
     role = verify_token(authorization)
-    if role != "dev":
-        raise HTTPException(status_code=403, detail="Only dev role can confirm changes")
 
     config = {"configurable": {"thread_id": req.session_id}}
 
@@ -290,8 +312,13 @@ async def confirm(
 
     if not req.approve:
         # Reject: drop the staged proposals and resume the graph to record the
-        # human's decision without applying anything.
+        # human's decision without applying anything. The graph is compiled
+        # with interrupt_before=["human_gate"], so the checkpoint is paused
+        # just before that node; passing None as input resumes it from the
+        # checkpoint rather than starting a new turn. Without this call the
+        # session would stay parked at human_gate forever.
         _patchstore.clear(req.session_id)
+        agent_graph.invoke(None, config=config)
         return {
             "status": "rejected",
             "detail": "Proposal discarded (not applied).",
@@ -303,6 +330,8 @@ async def confirm(
     if not proposals:
         # No patchable proposal staged (e.g. the agent only answered a query);
         # nothing to apply — report approved with an empty applied list.
+        # Still resume so the checkpoint doesn't stall (see comment above).
+        agent_graph.invoke(None, config=config)
         return {
             "status": "approved",
             "reply": "No pending proposals to apply.",
@@ -332,12 +361,14 @@ async def confirm(
         apply_resp.raise_for_status()
         apply_result = apply_resp.json()
     except requests.ConnectionError:
+        agent_graph.invoke(None, config=config)
         return {
             "status": "error",
             "reply": f"apply-agent not reachable at {apply_url}",
             "detail": f"apply-agent not reachable at {apply_url}",
         }
     except requests.Timeout:
+        agent_graph.invoke(None, config=config)
         return {
             "status": "error",
             "reply": "apply-agent timed out",
@@ -348,17 +379,24 @@ async def confirm(
             detail = exc.response.json().get("detail", str(exc))
         except Exception:
             detail = str(exc)
+        agent_graph.invoke(None, config=config)
         return {
             "status": "error",
             "reply": detail,
             "detail": detail,
         }
     except Exception as exc:
+        agent_graph.invoke(None, config=config)
         return {
             "status": "error",
             "reply": str(exc),
             "detail": str(exc),
         }
+
+    # Resume the paused checkpoint now that the apply outcome (success or
+    # failure) is known, regardless of whether apply-agent reported "ok" —
+    # an apply failure still needs to unstick the session for the next turn.
+    agent_graph.invoke(None, config=config)
 
     if apply_result.get("status") == "ok":
         _patchstore.mark_applied(req.session_id, [p.id for p in proposals])
@@ -368,18 +406,18 @@ async def confirm(
             "session_id": req.session_id,
             "role": role,
             "event": "apply",
-            "status": apply_result.status,
-            "branch": apply_result.branch,
-            "pr_url": apply_result.pr_url,
-            "detail": apply_result.detail,
+            "status": apply_result.get("status"),
+            "branch": apply_result.get("branch"),
+            "pr_url": apply_result.get("pr_url"),
+            "detail": apply_result.get("detail"),
         }
     )
 
     return {
-        "status": apply_result.status,
-        "reply": apply_result.detail or "Proposal processed.",
-        "applied_files": apply_result.applied_files,
-        "branch": apply_result.branch,
-        "pr_url": apply_result.pr_url,
-        "detail": apply_result.detail,
+        "status": apply_result.get("status"),
+        "reply": apply_result.get("detail") or "Proposal processed.",
+        "applied_files": apply_result.get("applied_files"),
+        "branch": apply_result.get("branch"),
+        "pr_url": apply_result.get("pr_url"),
+        "detail": apply_result.get("detail"),
     }
