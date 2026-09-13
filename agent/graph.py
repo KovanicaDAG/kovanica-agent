@@ -73,7 +73,7 @@ def _resolve_llm() -> ChatOpenAI:
     """Pick the OpenAI-compatible LLM endpoint.
 
     The LLM is an external inference service speaking the OpenAI chat-completions
-    protocol. Kovi selects and talks to it; Kovi itself provides the agent layer
+    protocol. Kovanica selects and talks to it; Kovanica itself provides the agent layer
     (tool use, graph, RAG, sandbox). Precedence:
       1. LLM_BASE_URL (+ LLM_API_KEY / XAI_API_KEY / OPENAI_API_KEY)
       2. VLLM_BASE_URL (compose: vLLM on GPU, Ollama on CPU)

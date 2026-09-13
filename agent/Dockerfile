@@ -20,8 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/* \
-    && git config --global user.name "Kovi Agent" \
-    && git config --global user.email "kovi@kovanica.online"
+    && git config --global user.name "Kovanica Agent" \
+    && git config --global user.email "kovanica@kovanica.online"
 
 WORKDIR /app
 

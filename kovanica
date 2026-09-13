@@ -1,0 +1,55 @@
+#!/root/kovanica-agent/venv/bin/python3
+"""
+Kovanica CLI — Enhanced command-line interface to the Kovanica engineering agent.
+
+This is the enhanced CLI with slash commands, session management, plugins,
+memory providers, goals, theming, and more.
+
+Usage:
+  kovanica chat "how is selected_parent computed"
+  kovanica explain mergeset
+  kovanica search "coinbase maturity"
+  kovanica cargo test -p kovanica-dag
+  kovanica kovanica head
+  kovanica diff crates/kovanica-state/src/ledger.rs "fix maturity" '--- a/...'
+  kovanica --resume latest
+  kovanica --output-format json chat "hello"
+  kovanica --completion bash > ~/.bash_completion.d/kovanica
+
+REPL mode (no subcommand):
+  kovanica
+  Then use /commands, !shell, or chat naturally
+
+Environment:
+  LLM_BASE_URL / VLLM_BASE_URL / Ollama : LLM endpoint (OpenAI chat protocol)
+  LLM_API_KEY / XAI_API_KEY / OPENAI_API_KEY : API key
+  AGENT_MODEL : model name (default: qwen2.5-coder:3b on CPU, Qwen2.5-Coder-32B-Instruct-AWQ on GPU)
+  KOVANICA_NODE_URL : read-only node RPC for /api/head (default: https://explorer.kovanica.online)
+  REPOS_PATH : protocol repo root (default: /repos/kovanica-protocol -> /root/kovanica-protocol)
+
+The LLM is an external inference service. Kovanica provides the agent layer
+(tools, grounding, safety rules). On CPU hosts the default model is
+qwen2.5-coder:3b via Ollama; on GPU it is Qwen/Qwen2.5-Coder-32B-Instruct-AWQ via vLLM.
+
+Safety rules (from SYSTEM_PROMPT.md, enforced in code):
+  - Never run KOVANICA_OPERATOR=1 or any operator override
+  - Never apply a patch to the real repo; only propose (git_diff_suggest semantics)
+  - Only cargo check/test/clippy/build may run
+  - Never write, log, or echo back secrets
+  - Never invent file paths — cite real ones or say so
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Add agent directory to path
+AGENT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(AGENT_DIR))
+
+# Import and run the enhanced CLI
+from agent.cli.cli import main
+
+if __name__ == "__main__":
+    main()

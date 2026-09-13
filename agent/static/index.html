@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kovi — Kovanica engineering agent</title>
-  <meta name="description" content="Kovi, Product of Kovanica. Ask about GHOSTDAG, the KVNC testnet, and the protocol codebase." />
+  <title>Kovanica — Kovanica engineering agent</title>
+  <meta name="description" content="Kovanica, Product of Kovanica. Ask about GHOSTDAG, the KVNC testnet, and the protocol codebase." />
   <meta name="theme-color" content="#09090b" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -115,8 +115,8 @@
 </head>
 <body>
   <header>
-    <a class="brand" href="/" aria-label="Kovi home">
-      <h1>Kovi</h1>
+    <a class="brand" href="/" aria-label="Kovanica home">
+      <h1>Kovanica</h1>
       <span class="tag">Product of Kovanica</span>
     </a>
     <div class="status" id="status"><span class="dot" id="dot"></span><span id="status-text">connecting</span></div>
@@ -124,7 +124,7 @@
   <main>
     <div id="log">
       <div class="welcome" id="welcome">
-        <h2>Kovi</h2>
+        <h2>Kovanica</h2>
         <p>The Kovanica engineering agent. Ask about GHOSTDAG, the testnet, KVNC, or the protocol crates.</p>
         <div class="chips">
           <button class="chip" type="button" data-q="What is GHOSTDAG, and how does Kovanica use it?">What is GHOSTDAG?</button>
@@ -135,7 +135,7 @@
       </div>
     </div>
     <form class="composer" id="form">
-      <textarea id="input" rows="1" placeholder="Ask Kovi about the protocol…" autocomplete="off"></textarea>
+      <textarea id="input" rows="1" placeholder="Ask Kovanica about the protocol…" autocomplete="off"></textarea>
       <button class="send" id="send" type="submit">Send</button>
     </form>
   </main>
@@ -210,7 +210,7 @@
       addMsg("user", message);
       const thinking = document.createElement("div");
       thinking.className = "typing";
-      thinking.textContent = "Kovi is thinking…";
+      thinking.textContent = "Kovanica is thinking…";
       logEl.appendChild(thinking);
       logEl.scrollTop = logEl.scrollHeight;
       try {
@@ -238,7 +238,7 @@
         }
       } catch (err) {
         thinking.remove();
-        addMsg("agent", "Could not reach Kovi: " + err.message);
+        addMsg("agent", "Could not reach Kovanica: " + err.message);
       } finally {
         pending = false;
         send.disabled = false;

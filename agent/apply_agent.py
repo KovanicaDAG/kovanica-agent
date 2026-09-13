@@ -28,7 +28,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-app = FastAPI(title="Kovi Apply Agent")
+app = FastAPI(title="Kovanica Apply Agent")
 
 ENABLED_VAR = "AGENT_GIT_APPLY_ENABLED"
 REPO_VAR = "AGENT_GIT_REPO"
