@@ -87,7 +87,7 @@ curl -s -X POST http://localhost:13080/chat \
   -d '{"session_id":"sess-1","message":"how is GHOSTDAG selection implemented"}'
 
 # dev role (your AUTH_DEV_TOKEN): full tool set — also git_diff_suggest, run_cargo
-TOKEN="d1acc8370cd74fc94b2c2464cd004409d76f4a9ebd7fc719"
+TOKEN="${AUTH_DEV_TOKEN}"  # set in .env or export manually
 curl -s -X POST http://localhost:13080/chat \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
