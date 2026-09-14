@@ -2,10 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Kovanica — Kovanica engineering agent</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Kovanica — Kovanica Engineering Agent</title>
   <meta name="description" content="Kovanica, Product of Kovanica. Ask about GHOSTDAG, the KVNC testnet, and the protocol codebase." />
   <meta name="theme-color" content="#09090b" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -25,6 +27,13 @@
       --font-display: "Fraunces", ui-serif, Georgia, serif;
       --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
       --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow: 0 4px 24px rgba(0,0,0,0.4);
+      --transition: 150ms ease;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-sans); }
@@ -53,10 +62,11 @@
     .dot.bad { background: var(--danger); }
     main {
       flex: 1; display: flex; flex-direction: column;
-      width: 100%; max-width: 760px; margin: 0 auto; padding: 20px 16px 12px;
+      width: 100%; max-width: 900px; margin: 0 auto; padding: 20px 16px 12px;
     }
     #log { flex: 1; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; padding-bottom: 8px; }
-    .msg { max-width: 92%; padding: 12px 14px; border-radius: 12px; line-height: 1.55; font-size: 15px; white-space: pre-wrap; word-break: break-word; }
+    .msg { max-width: 92%; padding: 12px 14px; border-radius: 12px; line-height: 1.55; font-size: 15px; white-space: pre-wrap; word-break: break-word; animation: fadeIn 0.2s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
     .msg.user { align-self: flex-end; background: var(--surface-2); border: 1px solid var(--border); }
     .msg.agent { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); }
     .msg.system { align-self: center; color: var(--subtle); font-size: 13px; background: transparent; border: 0; padding: 4px; }
@@ -64,21 +74,36 @@
       font-family: var(--font-mono); font-size: 13px; background: #00000055;
       padding: 1px 5px; border-radius: 4px;
     }
+    .msg .diff { background: #00000080; border-radius: 8px; padding: 12px; margin: 8px 0; overflow-x: auto; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; }
+    .msg .diff .add { color: var(--ok); }
+    .msg .diff .remove { color: var(--danger); }
+    .msg .diff .context { color: var(--subtle); }
+    .msg .timeline { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; padding-left: 8px; border-left: 2px solid var(--border); font-size: 12px; color: var(--muted); }
+    .msg .timeline-item { display: flex; gap: 8px; align-items: flex-start; }
+    .msg .timeline-item .time { color: var(--subtle); white-space: nowrap; font-family: var(--font-mono); font-size: 11px; }
+    .msg .timeline-item .event { color: var(--fg); }
+    .msg .timeline-item .event.ok { color: var(--ok); }
+    .msg .timeline-item .event.error { color: var(--danger); }
+    .msg .timeline-item .event.warn { color: var(--gold); }
     .welcome { margin: 24px 0 8px; text-align: center; }
     .welcome h2 {
       font-family: var(--font-display); font-style: italic; font-weight: 600;
-      font-size: 40px; margin: 0; letter-spacing: -0.03em;
+      font-size: clamp(28px, 6vw, 40px); margin: 0; letter-spacing: -0.03em;
     }
     .welcome p { color: var(--muted); max-width: 420px; margin: 10px auto 0; line-height: 1.5; font-size: 15px; }
     .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 20px; }
     .chip {
       border: 1px solid var(--border); background: var(--surface); color: var(--fg);
       border-radius: 999px; padding: 8px 14px; font-size: 13px;
+      transition: background var(--transition), border-color var(--transition);
     }
-    .chip:hover { background: var(--surface-2); }
+    .chip:hover { background: var(--surface-2); border-color: var(--blue); }
+    .chip:active { transform: scale(0.98); }
     form.composer {
       display: flex; gap: 8px; align-items: flex-end;
       padding: 10px 0 16px; position: sticky; bottom: 0; background: var(--bg);
+      border-top: 1px solid var(--border); padding-top: 16px;
+      margin-top: auto;
     }
     textarea {
       flex: 1; resize: none; min-height: 48px; max-height: 160px;
@@ -89,16 +114,21 @@
     button.send {
       height: 48px; padding: 0 18px; border: 0; border-radius: 12px;
       background: var(--fg); color: var(--bg); font-weight: 600; font-size: 14px;
+      transition: opacity var(--transition), transform var(--transition);
     }
     button.send:disabled { opacity: 0.45; }
+    button.send:active:not(:disabled) { transform: scale(0.98); }
     .confirm {
       display: flex; gap: 8px; margin-top: 10px;
     }
     .confirm button {
       height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--border);
       background: var(--surface-2); color: var(--fg); font-size: 13px;
+      transition: background var(--transition), border-color var(--transition);
     }
     .confirm .approve { background: var(--ok); color: #0a0a0b; border: 0; font-weight: 600; }
+    .confirm .approve:hover { filter: brightness(1.1); }
+    .confirm button:last-child:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
     details.settings { color: var(--subtle); font-size: 12px; }
     details.settings summary { cursor: pointer; list-style: none; }
     details.settings input {
@@ -110,35 +140,87 @@
       text-align: center; font-size: 12px; color: var(--subtle);
       padding: 0 16px 18px;
     }
-    .typing { color: var(--subtle); font-size: 13px; align-self: flex-start; padding: 4px 6px; }
+    .typing { color: var(--subtle); font-size: 13px; align-self: flex-start; padding: 4px 6px; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+    .streaming { border-left: 3px solid var(--blue); padding-left: 12px; }
+    .streaming .cursor { display: inline-block; width: 8px; height: 1.2em; background: var(--blue); animation: blink 1s infinite; margin-left: 2px; vertical-align: text-bottom; }
+    @keyframes blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
+    .timeline-toggle { background: none; border: none; color: var(--muted); font-size: 11px; padding: 2px 8px; border-radius: 4px; cursor: pointer; }
+    .timeline-toggle:hover { background: var(--surface-2); color: var(--fg); }
+    .timeline-toggle.active { color: var(--blue); background: var(--surface-2); }
+    .diff-viewer { position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 100; display: flex; flex-direction: column; display: none; }
+    .diff-viewer.open { display: flex; }
+    .diff-viewer header { display: flex; justify-content: space-between; align-items: center; padding: 16px; border-bottom: 1px solid var(--border); }
+    .diff-viewer .content { flex: 1; overflow: auto; padding: 16px; }
+    .diff-viewer .close { background: none; border: none; color: var(--fg); font-size: 24px; cursor: pointer; }
+    .sidebar { position: fixed; right: 0; top: 56px; bottom: 0; width: 280px; background: var(--surface); border-left: 1px solid var(--border); z-index: 20; transform: translateX(100%); transition: transform var(--transition); }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+    .sidebar .close { background: none; border: none; color: var(--fg); font-size: 20px; cursor: pointer; }
+    .sidebar .content { padding: 16px; overflow-y: auto; height: calc(100% - 56px); }
+    .sidebar .session-item { padding: 10px; border-radius: 8px; cursor: pointer; transition: background var(--transition); }
+    .sidebar .session-item:hover { background: var(--surface-2); }
+    .sidebar .session-item.active { background: var(--surface-2); border-left: 3px solid var(--blue); }
+    .sidebar .session-item .title { font-weight: 500; font-size: 13px; }
+    .sidebar .session-item .meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .mobile-menu { display: none; background: none; border: none; color: var(--fg); font-size: 24px; cursor: pointer; padding: 8px; }
+    @media (max-width: 640px) {
+      .mobile-menu { display: block; }
+      .sidebar { width: 100%; max-width: 320px; }
+      main { padding: 16px 12px 12px; }
+      .msg { max-width: 100%; }
+      .chips { gap: 6px; }
+      .chip { padding: 6px 12px; font-size: 12px; }
+      .welcome h2 { font-size: 32px; }
+      .welcome p { font-size: 14px; }
+      .diff-viewer .content { padding: 12px; }
+    }
+    @media (max-width: 480px) {
+      header { height: 52px; padding: 0 12px; }
+      .brand h1 { font-size: 18px; }
+      .brand .tag { font-size: 9px; }
+      .welcome h2 { font-size: 28px; }
+    }
   </style>
 </head>
 <body>
   <header>
+    <button class="mobile-menu" id="menu-toggle" aria-label="Menu" aria-expanded="false">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+    </button>
     <a class="brand" href="/" aria-label="Kovanica home">
       <h1>Kovanica</h1>
       <span class="tag">Product of Kovanica</span>
     </a>
     <div class="status" id="status"><span class="dot" id="dot"></span><span id="status-text">connecting</span></div>
   </header>
+  <aside class="sidebar" id="sidebar" aria-label="Sessions">
+    <header>
+      <h3 style="margin:0;font-size:14px;font-weight:600;">Sessions</h3>
+      <button class="close" id="sidebar-close" aria-label="Close sidebar">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </button>
+    </header>
+    <div class="content" id="sidebar-content"></div>
+  </aside>
   <main>
-    <div id="log">
-      <div class="welcome" id="welcome">
-        <h2>Kovanica</h2>
-        <p>The Kovanica engineering agent. Ask about GHOSTDAG, the testnet, KVNC, or the protocol crates.</p>
-        <div class="chips">
-          <button class="chip" type="button" data-q="What is GHOSTDAG, and how does Kovanica use it?">What is GHOSTDAG?</button>
-          <button class="chip" type="button" data-q="What is the current testnet head and height?">Testnet head</button>
-          <button class="chip" type="button" data-q="Explain k-cluster, blue set, and selected parent.">k-cluster & blue set</button>
-          <button class="chip" type="button" data-q="How do I run a kovanica-node and join kovanica-testnet?">Join the testnet</button>
-        </div>
-      </div>
-    </div>
+    <div id="log"></div>
     <form class="composer" id="form">
-      <textarea id="input" rows="1" placeholder="Ask Kovanica about the protocol…" autocomplete="off"></textarea>
-      <button class="send" id="send" type="submit">Send</button>
+      <textarea id="input" rows="1" placeholder="Ask Kovanica about the protocol…" autocomplete="off" aria-label="Message"></textarea>
+      <button class="send" id="send" type="submit" aria-label="Send message">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+      </button>
     </form>
   </main>
+  <div class="diff-viewer" id="diff-viewer" role="dialog" aria-modal="true" aria-labelledby="diff-title">
+    <header>
+      <h3 id="diff-title">Diff Viewer</h3>
+      <button class="close" id="diff-close" aria-label="Close diff viewer">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+      </button>
+    </header>
+    <div class="content" id="diff-content"></div>
+  </div>
   <footer>
     <details class="settings">
       <summary>Dev token (optional — required only to approve patches)</summary>
@@ -156,29 +238,65 @@
     const send = document.getElementById("send");
     const tokenEl = document.getElementById("token");
     const welcome = document.getElementById("welcome");
+    const sidebar = document.getElementById("sidebar");
+    const sidebarContent = document.getElementById("sidebar-content");
+    const menuToggle = document.getElementById("menu-toggle");
+    const sidebarClose = document.getElementById("sidebar-close");
+    const diffViewer = document.getElementById("diff-viewer");
+    const diffClose = document.getElementById("diff-close");
+    const diffContent = document.getElementById("diff-content");
     const sessionId = (() => {
-      const k = "kovi.session";
+      const k = "kovanica.session";
       let id = localStorage.getItem(k);
       if (!id) { id = crypto.randomUUID(); localStorage.setItem(k, id); }
       return id;
     })();
-    tokenEl.value = localStorage.getItem("kovi.token") || "";
-    tokenEl.addEventListener("change", () => localStorage.setItem("kovi.token", tokenEl.value.trim()));
+    tokenEl.value = localStorage.getItem("kovanica.token") || "";
+    tokenEl.addEventListener("change", () => localStorage.setItem("kovanica.token", tokenEl.value.trim()));
 
-    function addMsg(role, text) {
+    function addMsg(role, text, meta = {}) {
       const div = document.createElement("div");
       div.className = "msg " + role;
       div.innerHTML = format(text);
+      if (meta.timeline && meta.timeline.length) {
+        const tl = document.createElement("div");
+        tl.className = "timeline";
+        meta.timeline.forEach(t => {
+          const item = document.createElement("div");
+          item.className = "timeline-item";
+          item.innerHTML = `<span class="time">${t.time}</span><span class="event ${t.type || ''}">${t.text}</span>`;
+          tl.appendChild(item);
+        });
+        div.appendChild(tl);
+      }
+      if (meta.diff) {
+        const diff = document.createElement("div");
+        diff.className = "diff";
+        diff.innerHTML = formatDiff(meta.diff);
+        div.appendChild(diff);
+      }
       logEl.appendChild(div);
       logEl.scrollTop = logEl.scrollHeight;
       return div;
     }
-        function format(text) {
-      const map = {"&": "&amp;", "<": "&lt;", ">": "&gt;"};
+    function format(text) {
+      const map = {"&": "&", "<": "<", ">": ">"};
       const esc = (s) => s.replace(/[&<>]/g, (c) => map[c]);
       let s = esc(text || "");
       s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+      s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+      s = s.replace(/\*(.+?)\*/g, "<em>$1</em>");
       return s;
+    }
+    function formatDiff(diff) {
+      return diff.split("\n").map(line => {
+        if (line.startsWith("+")) return `<span class="add">${escapeHtml(line)}</span>`;
+        if (line.startsWith("-")) return `<span class="remove">${escapeHtml(line)}</span>`;
+        return `<span class="context">${escapeHtml(line)}</span>`;
+      }).join("\n");
+    }
+    function escapeHtml(s) {
+      return s.replace(/&/g, "&").replace(/</g, "<").replace(/>/g, ">");
     }
     async function ping() {
       try {
@@ -202,6 +320,9 @@
     }
 
     let pending = false;
+    let streaming = false;
+    let eventSource = null;
+
     async function ask(message) {
       if (!message || pending) return;
       pending = true;
@@ -234,7 +355,7 @@
           bar.querySelector(".approve").onclick = () => confirm(true);
           bar.querySelector("button:last-child").onclick = () => confirm(false);
         } else {
-          addMsg("agent", data.reply || JSON.stringify(data));
+          addMsg("agent", data.reply || JSON.stringify(data), { timeline: data.timeline, diff: data.diff });
         }
       } catch (err) {
         thinking.remove();
@@ -266,6 +387,13 @@
       }
     }
 
+    function headers() {
+      const h = { "Content-Type": "application/json" };
+      const t = tokenEl.value.trim();
+      if (t) h["Authorization"] = t.startsWith("Bearer ") ? t : "Bearer " + t;
+      return h;
+    }
+
     form.addEventListener("submit", (e) => {
       e.preventDefault();
       const msg = input.value.trim();
@@ -285,6 +413,72 @@
     });
     document.querySelectorAll(".chip").forEach((b) => {
       b.addEventListener("click", () => ask(b.getAttribute("data-q")));
+    });
+
+    // Sidebar toggle
+    menuToggle.addEventListener("click", () => {
+      sidebar.classList.toggle("open");
+      menuToggle.setAttribute("aria-expanded", sidebar.classList.contains("open"));
+    });
+    sidebarClose.addEventListener("click", () => {
+      sidebar.classList.remove("open");
+      menuToggle.setAttribute("aria-expanded", "false");
+    });
+    document.addEventListener("click", (e) => {
+      if (!sidebar.contains(e.target) && !menuToggle.contains(e.target)) {
+        sidebar.classList.remove("open");
+        menuToggle.setAttribute("aria-expanded", "false");
+      }
+    });
+
+    // Diff viewer
+    diffClose.addEventListener("click", () => diffViewer.classList.remove("open"));
+    diffViewer.addEventListener("click", (e) => {
+      if (e.target === diffViewer) diffViewer.classList.remove("open");
+    });
+
+    // Load sessions into sidebar
+    async function loadSessions() {
+      try {
+        const r = await fetch("/api/sessions", { headers: headers() });
+        const data = await r.json();
+        sidebarContent.innerHTML = "";
+        if (data.sessions && data.sessions.length) {
+          data.sessions.forEach(s => {
+            const item = document.createElement("div");
+            item.className = "session-item" + (s.id === sessionId ? " active" : "");
+            item.innerHTML = `<div class="title">${escapeHtml(s.title)}</div><div class="meta">${s.id} · ${s.turns} turns · ${s.worktree || "no worktree"}</div>`;
+            item.addEventListener("click", () => {
+              if (s.id !== sessionId) {
+                window.location.href = "/?session=" + s.id;
+              }
+              sidebar.classList.remove("open");
+            });
+            sidebarContent.appendChild(item);
+          });
+        }
+      } catch (e) {
+        sidebarContent.innerHTML = '<div style="color:var(--muted);padding:16px;text-align:center;">Failed to load sessions</div>';
+      }
+    }
+    loadSessions();
+
+    // Diff viewer
+    function showDiff(diff) {
+      diffContent.innerHTML = formatDiff(diff);
+      diffViewer.classList.add("open");
+    }
+
+    // Keyboard shortcuts
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        diffViewer.classList.remove("open");
+        sidebar.classList.remove("open");
+      }
+      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        sidebar.classList.toggle("open");
+      }
     });
   </script>
 </body>

@@ -70,12 +70,53 @@ class GoalCommand(BaseCommand):
             return CommandResult(success=False, error=f"Unknown subcommand: {parsed.subcommand}")
     
     def _get_goals(self) -> list:
-        # Placeholder - would load from session/goal store
-        return []
+        # Load from session file
+        if not self.cli.session.current_id:
+            return []
+        
+        session_file = self.cli.session.sessions_dir / f"{self.cli.session.current_id}.jsonl"
+        if not session_file.exists():
+            return []
+        
+        try:
+            with open(session_file) as f:
+                lines = f.readlines()
+            
+            if not lines:
+                return []
+            
+            meta = json.loads(lines[0])
+            return meta.get("goals", [])
+        except Exception:
+            return []
     
     def _save_goals(self, goals: list) -> None:
-        # Placeholder
-        pass
+        # Save to session file
+        if not self.cli.session.current_id:
+            return
+        
+        session_file = self.cli.session.sessions_dir / f"{self.cli.session.current_id}.jsonl"
+        if not session_file.exists():
+            return
+        
+        try:
+            with open(session_file) as f:
+                lines = f.readlines()
+            
+            if not lines:
+                return
+            
+            meta = json.loads(lines[0])
+            meta["goals"] = goals
+            
+            # Rewrite file with updated meta
+            new_lines = [json.dumps(meta)]
+            new_lines.extend(lines[1:])
+            
+            with open(session_file, "w") as f:
+                f.write("\n".join(new_lines) + "\n")
+        except Exception:
+            pass
     
     def _set_goal(self, parsed) -> CommandResult:
         import uuid
@@ -98,6 +139,10 @@ class GoalCommand(BaseCommand):
         
         # Set as current goal in session
         self.cli.session.set_current_goal(goal_id)
+        
+        # Enable auto-continue if requested
+        if parsed.auto_continue:
+            self.cli.session.set_auto_continue(goal_id, True)
         
         return CommandResult(
             success=True,
@@ -203,6 +248,9 @@ class GoalCommand(BaseCommand):
         goal["completed_at"] = "now"  # Would use datetime in real impl
         self._save_goals(goals)
         
+        # Disable auto-continue
+        self.cli.session.set_auto_continue(goal_id, False)
+        
         self.cli.session.clear_current_goal()
         
         return CommandResult(success=True, output=f"Goal completed: {goal_id}")
@@ -220,6 +268,9 @@ class GoalCommand(BaseCommand):
         
         goal["status"] = "cancelled"
         self._save_goals(goals)
+        
+        # Disable auto-continue
+        self.cli.session.set_auto_continue(goal_id, False)
         
         self.cli.session.clear_current_goal()
         
@@ -272,9 +323,12 @@ class HeartbeatCommand(BaseCommand):
         from datetime import datetime
         
         hb_id = str(uuid.uuid4())[:8]
+        interval_seconds = self.cli.session.parse_interval(parsed.interval)
+        
         heartbeat = {
             "id": hb_id,
             "interval": parsed.interval,
+            "interval_seconds": interval_seconds,
             "prompt": parsed.prompt,
             "created": datetime.now().isoformat(),
             "status": "active",
@@ -284,6 +338,9 @@ class HeartbeatCommand(BaseCommand):
         heartbeats = self.cli.session.get_heartbeats()
         heartbeats.append(heartbeat)
         self.cli.session.set_heartbeats(heartbeats)
+        
+        # Start background task
+        self.cli.session.start_heartbeat(hb_id, interval_seconds, parsed.prompt)
         
         return CommandResult(
             success=True,
@@ -314,7 +371,9 @@ class HeartbeatCommand(BaseCommand):
         if not parsed.heartbeat_id:
             # Stop all
             for hb in heartbeats:
-                hb["status"] = "stopped"
+                if hb["status"] == "active":
+                    self.cli.session.stop_heartbeat(hb["id"])
+                    hb["status"] = "stopped"
             self.cli.session.set_heartbeats(heartbeats)
             return CommandResult(success=True, output="Stopped all heartbeats")
         
@@ -322,6 +381,7 @@ class HeartbeatCommand(BaseCommand):
         if not hb:
             return CommandResult(success=False, error=f"Heartbeat not found: {parsed.heartbeat_id}")
         
+        self.cli.session.stop_heartbeat(hb["id"])
         hb["status"] = "stopped"
         self.cli.session.set_heartbeats(heartbeats)
         

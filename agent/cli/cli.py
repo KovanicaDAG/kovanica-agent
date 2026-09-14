@@ -323,8 +323,13 @@ class KovanicaCLI:
         try:
             while True:
                 try:
-                    # Get prompt
-                    prompt = self._get_prompt()
+                    # Process queued prompts first
+                    if self.session.queue:
+                        prompt = self.session.queue.pop(0)
+                        self.output.print(f"[Queued] {prompt}")
+                    else:
+                        # Get prompt
+                        prompt = self._get_prompt()
                     
                     if not prompt:
                         continue
@@ -347,6 +352,16 @@ class KovanicaCLI:
                     result = self._handle_chat(prompt)
                     self.output.print_result(result)
                     
+                    # Check for auto-continue
+                    if self.session.is_auto_continue_active():
+                        goal_id = self.session.get_auto_continue_goal()
+                        if goal_id:
+                            # Auto-continue: send a continuation prompt
+                            continue_prompt = f"Continue working on goal {goal_id}. What's the next step?"
+                            self.output.print(f"[Auto-continue] {continue_prompt}")
+                            result = self._handle_chat(continue_prompt)
+                            self.output.print_result(result)
+                    
                 except KeyboardInterrupt:
                     print("\nInterrupted")
                     self.session.clear_stop()
@@ -354,6 +369,8 @@ class KovanicaCLI:
                     break
         
         finally:
+            # Stop all background tasks on exit
+            self.session.stop_all_background_tasks()
             self.output.print_end()
         
         return 0
@@ -434,6 +451,13 @@ class KovanicaCLI:
         """Handle a chat message."""
         # Save user message
         self.session.save_turn("user", message)
+        
+        # Include steer guidance if present
+        steer_guidance = self.session.get_steer_guidance()
+        if steer_guidance:
+            message = f"{message}\n\n[Steer guidance: {steer_guidance}]"
+            # Clear steer guidance after use (one-shot)
+            self.session.set_steer_guidance(None)
         
         # This would call the actual agent
         # For now, return a placeholder

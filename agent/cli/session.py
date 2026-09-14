@@ -6,9 +6,11 @@ from __future__ import annotations
 import json
 import uuid
 import subprocess
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 
 
 class SessionManager:
@@ -24,6 +26,15 @@ class SessionManager:
         self.steer_guidance: Optional[str] = None
         self.current_goal: Optional[str] = None
         self.stop_requested: bool = False
+        
+        # Background task support
+        self._bg_tasks: dict[str, threading.Thread] = {}
+        self._bg_stop_events: dict[str, threading.Event] = {}
+        self._bg_lock = threading.Lock()
+        
+        # Auto-continue state
+        self.auto_continue_active: bool = False
+        self.auto_continue_goal_id: Optional[str] = None
         
         # Ensure sessions directory exists
         self.sessions_dir = Path.home() / ".kovanica" / "sessions"
@@ -123,6 +134,7 @@ class SessionManager:
             "turns": 0,
             "model": self.config.get("model", ""),
             "worktree": self.get_worktree_info(),
+            "goals": [],
         }
         
         with open(session_file, "w") as f:
@@ -223,3 +235,101 @@ class SessionManager:
     
     def is_stop_requested(self) -> bool:
         return self.stop_requested
+    
+    # Background task management
+    def start_background_task(self, task_id: str, target: Callable, *args, **kwargs) -> bool:
+        """Start a background task."""
+        with self._bg_lock:
+            if task_id in self._bg_tasks:
+                return False  # Already running
+            
+            stop_event = threading.Event()
+            thread = threading.Thread(target=target, args=(stop_event,) + args, kwargs=kwargs, daemon=True)
+            
+            self._bg_stop_events[task_id] = stop_event
+            self._bg_tasks[task_id] = thread
+            thread.start()
+            return True
+    
+    def stop_background_task(self, task_id: str) -> bool:
+        """Stop a background task."""
+        with self._bg_lock:
+            if task_id not in self._bg_tasks:
+                return False
+            
+            self._bg_stop_events[task_id].set()
+            thread = self._bg_tasks.pop(task_id)
+            self._bg_stop_events.pop(task_id)
+            
+            # Wait for thread to finish (with timeout)
+            thread.join(timeout=2.0)
+            return True
+    
+    def stop_all_background_tasks(self) -> None:
+        """Stop all background tasks."""
+        with self._bg_lock:
+            for task_id in list(self._bg_tasks.keys()):
+                self._bg_stop_events[task_id].set()
+            
+            for task_id, thread in self._bg_tasks.items():
+                thread.join(timeout=2.0)
+            
+            self._bg_tasks.clear()
+            self._bg_stop_events.clear()
+    
+    def is_background_task_running(self, task_id: str) -> bool:
+        """Check if a background task is running."""
+        with self._bg_lock:
+            return task_id in self._bg_tasks
+    
+    # Heartbeat runner
+    def _run_heartbeat(self, stop_event: threading.Event, heartbeat_id: str, interval_seconds: float, prompt: str) -> None:
+        """Background task to send heartbeat prompts at intervals."""
+        while not stop_event.is_set():
+            # Wait for interval or stop
+            if stop_event.wait(timeout=interval_seconds):
+                break
+            
+            # Check if session is still active
+            if not self.current_id:
+                break
+            
+            # Add heartbeat prompt to queue for next turn
+            self.queue.append(f"[Heartbeat {heartbeat_id}] {prompt}")
+    
+    def start_heartbeat(self, heartbeat_id: str, interval_seconds: float, prompt: str) -> bool:
+        """Start a heartbeat background task."""
+        task_id = f"heartbeat_{heartbeat_id}"
+        return self.start_background_task(task_id, self._run_heartbeat, heartbeat_id, interval_seconds, prompt)
+    
+    def stop_heartbeat(self, heartbeat_id: str) -> bool:
+        """Stop a heartbeat background task."""
+        task_id = f"heartbeat_{heartbeat_id}"
+        return self.stop_background_task(task_id)
+    
+    # Auto-continue for goals
+    def set_auto_continue(self, goal_id: str, active: bool) -> None:
+        """Enable/disable auto-continue for a goal."""
+        self.auto_continue_active = active
+        self.auto_continue_goal_id = goal_id if active else None
+    
+    def is_auto_continue_active(self) -> bool:
+        return self.auto_continue_active
+    
+    def get_auto_continue_goal(self) -> Optional[str]:
+        return self.auto_continue_goal_id
+    
+    # Parse interval string (e.g., "30s", "5m", "1h")
+    @staticmethod
+    def parse_interval(interval_str: str) -> float:
+        """Parse interval string to seconds."""
+        interval_str = interval_str.strip().lower()
+        if interval_str.endswith('s'):
+            return float(interval_str[:-1])
+        elif interval_str.endswith('m'):
+            return float(interval_str[:-1]) * 60
+        elif interval_str.endswith('h'):
+            return float(interval_str[:-1]) * 3600
+        else:
+            # Default to seconds
+            return float(interval_str)

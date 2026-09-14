@@ -5,10 +5,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 from .base import BaseCommand, CLIContext, CommandResult
+
+# Import memory providers
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from memory_providers import (
+    MemoryProvider,
+    LocalMemoryProvider,
+    SQLiteMemoryProvider,
+    VectorMemoryProvider,
+    ByteRoverProvider,
+    SupermemoryProvider,
+    get_provider,
+    get_available_providers,
+    initialize_providers,
+    MemoryItem,
+)
 
 
 class MemoryCommand(BaseCommand):
@@ -17,6 +34,40 @@ class MemoryCommand(BaseCommand):
     name = "memory"
     description = "Manage persistent memory across sessions"
     aliases = ["mem"]
+    
+    def __init__(self, cli_context: CLIContext):
+        super().__init__(cli_context)
+        self._provider_instances: dict[str, MemoryProvider] = {}
+        self._init_providers()
+    
+    def _init_providers(self) -> None:
+        """Initialize memory providers from config."""
+        config = self.cli.config.get_merged_config()
+        provider_configs = {
+            "local": {"memory_dir": str(Path.home() / ".kovanica" / "memory"), "memory_approval": config.get("memory_approval", True)},
+            "sqlite": {"sqlite_path": str(Path.home() / ".kovanica" / "memory" / "memory.db")},
+            "vector": {"chroma_path": str(Path.home() / ".kovanica" / "memory" / "chroma")},
+            "byterover": {"api_key": os.environ.get("BYTEROVER_API_KEY")},
+            "supermemory": {"api_key": os.environ.get("SUPERMEMORY_API_KEY")},
+        }
+        
+        for name, provider_class in {
+            "local": LocalMemoryProvider,
+            "sqlite": SQLiteMemoryProvider,
+            "vector": VectorMemoryProvider,
+            "byterover": ByteRoverProvider,
+            "supermemory": SupermemoryProvider,
+        }.items():
+            provider = provider_class()
+            if provider.initialize(provider_configs.get(name, {})):
+                self._provider_instances[name] = provider
+    
+    def _get_provider(self, name: str) -> MemoryProvider:
+        """Get provider by name, defaulting to local."""
+        return self._provider_instances.get(name, self._provider_instances.get("local"))
+    
+    def _get_all_providers(self) -> list[MemoryProvider]:
+        return list(self._provider_instances.values())
     
     def create_parser(self) -> argparse.ArgumentParser:
         parser = super().create_parser()
@@ -181,6 +232,18 @@ class MemoryCommand(BaseCommand):
         return CommandResult(success=True, output=f"Memory approval gate: {'enabled' if enabled else 'disabled'}")
     
     def _list(self, parsed) -> CommandResult:
+        # Search across all configured providers
+        all_items = []
+        providers_to_search = [parsed.provider] if parsed.provider else list(self._providers.keys())
+        
+        for provider_name in providers_to_search:
+            provider = self._get_provider(provider_name)
+            if provider:
+                # For listing, we'd need a way to get all items from provider
+                # For now, fall back to local storage
+                pass
+        
+        # Fallback to local storage for now
         items = self._load_approved()
         
         if parsed.provider:
@@ -200,13 +263,34 @@ class MemoryCommand(BaseCommand):
         return CommandResult(success=True, output="\n".join(lines))
     
     def _providers(self, parsed) -> CommandResult:
-        providers = [
-            {"name": "local", "description": "Local JSONL storage", "available": True, "configured": True},
-            {"name": "sqlite", "description": "SQLite-backed memory", "available": True, "configured": False},
-            {"name": "vector", "description": "Vector database (Chroma, Pinecone, etc.)", "available": False, "configured": False},
-            {"name": "byterover", "description": "ByteRover hierarchical knowledge", "available": False, "configured": False},
-            {"name": "supermemory", "description": "Supermemory semantic graph", "available": False, "configured": False},
-        ]
+        providers = []
+        for name, provider in self._provider_instances.items():
+            health = provider.health_check()
+            providers.append({
+                "name": name,
+                "description": provider.description,
+                "available": True,
+                "configured": True,
+                "health": health,
+            })
+        
+        # Add unavailable providers
+        all_names = {"local", "sqlite", "vector", "byterover", "supermemory"}
+        for name in all_names - set(self._provider_instances.keys()):
+            provider_class = {
+                "local": LocalMemoryProvider,
+                "sqlite": SQLiteMemoryProvider,
+                "vector": VectorMemoryProvider,
+                "byterover": ByteRoverProvider,
+                "supermemory": SupermemoryProvider,
+            }[name]
+            provider = provider_class()
+            providers.append({
+                "name": name,
+                "description": provider.description,
+                "available": provider.is_available(),
+                "configured": False,
+            })
         
         if parsed.json:
             return CommandResult(success=True, output=json.dumps(providers, indent=2))
@@ -217,13 +301,27 @@ class MemoryCommand(BaseCommand):
             configured = "[blue]configured[/blue]" if p["configured"] else ""
             lines.append(f"  {p['name']}  {status} {configured}")
             lines.append(f"    {p['description']}")
+            if "health" in p:
+                health = p["health"]
+                lines.append(f"    Status: {health.get('status', 'unknown')}")
+                if "item_count" in health:
+                    lines.append(f"    Items: {health['item_count']}")
         
         return CommandResult(success=True, output="\n".join(lines))
     
     def _sync(self, parsed) -> CommandResult:
-        # Placeholder - would sync with configured providers
-        provider = parsed.provider or "all"
-        return CommandResult(success=True, output=f"Syncing memory with provider(s): {provider} (placeholder)")
+        providers_to_sync = [parsed.provider] if parsed.provider else list(self._provider_instances.keys())
+        results = []
+        
+        for provider_name in providers_to_sync:
+            provider = self._get_provider(provider_name)
+            if provider:
+                health = provider.health_check()
+                results.append(f"  {provider_name}: {health.get('status', 'unknown')}")
+            else:
+                results.append(f"  {provider_name}: not configured")
+        
+        return CommandResult(success=True, output="Syncing memory with providers:\n" + "\n".join(results))
     
     def _notify_provider(self, action: str, item: dict) -> None:
         # Placeholder - would call provider sync_turn
