@@ -1,0 +1,913 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Kovanica Engineering Agent API",
+    "description": "\n## Kovanica Engineering Agent API\n\nThe Kovanica Agent is an AI-powered engineering assistant that helps developers\nwith code changes, reviews, and repository operations through a conversational interface.\n\n### Features\n- **Chat Interface**: Natural language interaction with the engineering agent\n- **Diff Proposals**: Agent proposes code changes as unified diffs\n- **Human-in-the-loop**: Changes require explicit approval before application\n- **Git Integration**: Approved changes create branches and draft PRs\n- **Session Management**: Conversation state persisted per session\n\n### Authentication\nThe API uses JWT-based authentication with two modes:\n- **JWKS Mode**: Production mode using a JWKS endpoint (set `AUTH_JWKS_URL`)\n- **Dev Token Mode**: Development mode with a simple token (default)\n\nInclude the `Authorization: Bearer <token>` header in all requests.\n\n### Rate Limiting\n- Default: 30 requests per 60 seconds per IP\n- Configurable via `AGENT_RATE_LIMIT` and `AGENT_RATE_WINDOW_S` environment variables\n\n### Error Responses\nAll endpoints may return standard HTTP error codes:\n- `400` - Bad Request (invalid input)\n- `401` - Unauthorized (missing/invalid token)\n- `403` - Forbidden (insufficient role)\n- `429` - Too Many Requests (rate limited)\n- `500` - Internal Server Error\n- `503` - Service Unavailable (dependency failure)\n",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://kovi.kovanica.online",
+      "description": "Production server"
+    },
+    {
+      "url": "http://localhost:8080",
+      "description": "Local development server"
+    }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "UI"
+        ],
+        "summary": "Serve the Kovanica chat UI",
+        "description": "Returns the main HTML interface for interacting with the agent.",
+        "operationId": "index__get",
+        "responses": {
+          "200": {
+            "description": "HTML page served successfully"
+          },
+          "404": {
+            "description": "UI not packaged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Liveness probe",
+        "description": "Simple liveness check. Returns 200 if the service is running. Use for Kubernetes liveness probes.",
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "description": "Service is alive",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Readiness probe",
+        "description": "Checks connectivity to dependencies (Qdrant, LLM). Use for Kubernetes readiness probes. Returns dependency status for each configured service.",
+        "operationId": "readyz_readyz_get",
+        "responses": {
+          "200": {
+            "description": "Readiness status with dependencies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/chat": {
+      "post": {
+        "tags": [
+          "Chat"
+        ],
+        "summary": "Send a message and get the agent's response",
+        "description": "Send a message to the Kovanica Engineering Agent and receive a response.\n\nThe agent can:\n- Answer questions about the codebase\n- Propose code changes as unified diffs\n- Explain existing code\n- Suggest improvements\n\nIf the agent proposes changes, it returns a `pending_confirmation` status.\nYou must then call `POST /confirm` with `approve: true` to apply the changes,\nor `approve: false` to reject them.\n\n**Authentication**: Requires valid JWT token with `dev` role.\n**Rate Limited**: 30 requests per 60 seconds per IP.",
+        "operationId": "chat_chat_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ChatSuccessResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ChatPendingConfirmationResponse"
+                    }
+                  ],
+                  "title": "Response Chat Chat Post"
+                },
+                "examples": {
+                  "success": {
+                    "summary": "Normal reply",
+                    "value:": {
+                      "status": "ok",
+                      "reply": "I've added a health check endpoint at `/healthz` that returns `{\"status\": \"ok\", \"name\": \"kovi\"}`. The endpoint is now available."
+                    }
+                  },
+                  "pending_confirmation": {
+                    "summary": "Proposed changes requiring approval",
+                    "value": {
+                      "status": "pending_confirmation",
+                      "detail": "Agent proposed a repo change. Review and POST /confirm.",
+                      "messages": [
+                        "I'll add a health check endpoint to the FastAPI app.",
+                        "Here's the proposed change:",
+                        "```diff\n+ @app.get(\"/healthz\")\n+ def healthz():\n+     return {\"status\": \"ok\", \"name\": \"kovi\"}\n```"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request (empty message)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized (invalid/missing token)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden (requires dev role)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Message too long (>8000 chars)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/confirm": {
+      "post": {
+        "tags": [
+          "Confirmation"
+        ],
+        "summary": "Approve or reject a pending diff proposal",
+        "description": "Approve or reject a pending code change proposal from the agent.\n\nWhen the agent proposes changes (returns `pending_confirmation` from `/chat`),\nthis endpoint must be called to either:\n- **Approve** (`approve: true`): Applies the changes, creates a git branch,\n  and opens a draft pull request (if `AGENT_GIT_APPLY_ENABLED=1`).\n- **Reject** (`approve: false`): Discards the proposal without making any changes.\n\n**Authentication**: Requires valid JWT token with `dev` role.\n**Rate Limited**: 30 requests per 60 seconds per IP.",
+        "operationId": "confirm_confirm_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ConfirmRejectedResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ConfirmApprovedNoProposalsResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ConfirmAppliedResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ConfirmErrorResponse"
+                    }
+                  ],
+                  "title": "Response Confirm Confirm Post"
+                },
+                "examples": {
+                  "rejected": {
+                    "summary": "Proposal rejected",
+                    "value": {
+                      "status": "rejected",
+                      "detail": "Proposal discarded (not applied).",
+                      "reply": "Proposal discarded."
+                    }
+                  },
+                  "approved_no_proposals": {
+                    "summary": "Approved but no proposals to apply",
+                    "value": {
+                      "status": "approved",
+                      "reply": "No pending proposals to apply.",
+                      "applied": []
+                    }
+                  },
+                  "applied": {
+                    "summary": "Changes applied and PR created",
+                    "value": {
+                      "status": "ok",
+                      "reply": "Successfully applied changes and created PR #42",
+                      "applied_files": [
+                        "agent/main.py"
+                      ],
+                      "branch": "kovi/abc123-health-check",
+                      "pr_url": "https://github.com/org/repo/pull/42",
+                      "detail": "Successfully applied changes and created PR #42"
+                    }
+                  },
+                  "error": {
+                    "summary": "Apply operation failed",
+                    "value": {
+                      "status": "error",
+                      "reply": "apply-agent timed out",
+                      "detail": "apply-agent timed out"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized (invalid/missing token)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden (requires dev role)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Apply agent unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ChatPendingConfirmationResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "pending_confirmation",
+            "title": "Status",
+            "description": "Response status"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Human-readable explanation of next steps"
+          },
+          "messages": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Messages",
+            "description": "Recent conversation messages including the proposed diff"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "detail",
+          "messages"
+        ],
+        "title": "ChatPendingConfirmationResponse",
+        "description": "Response when agent proposes changes requiring confirmation.",
+        "example": {
+          "detail": "Agent proposed a repo change. Review and POST /confirm.",
+          "messages": [
+            "I'll add a health check endpoint to the FastAPI app.",
+            "Here's the proposed change:",
+            "```diff\n+ @app.get(\"/healthz\")\n+ def healthz():\n+     return {\"status\": \"ok\", \"name\": \"kovi\"}\n```"
+          ],
+          "status": "pending_confirmation"
+        }
+      },
+      "ChatRequest": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Session Id",
+            "description": "Unique session identifier for conversation continuity. Generate a new UUID for each new conversation.",
+            "examples": [
+              "abc123-def456-ghi789",
+              "session-2024-01-15-001"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Message",
+            "description": "User message to the agent. Can be a question, task request, or follow-up to a previous response.",
+            "examples": [
+              "Add a health check endpoint to the FastAPI app",
+              "Review the authentication module for security issues",
+              "Create a new API endpoint for user management"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "message"
+        ],
+        "title": "ChatRequest",
+        "description": "Request to send a message to the engineering agent.",
+        "example": {
+          "message": "Add a health check endpoint to the FastAPI app",
+          "session_id": "abc123-def456-ghi789"
+        }
+      },
+      "ChatSuccessResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "description": "Response status"
+          },
+          "reply": {
+            "type": "string",
+            "title": "Reply",
+            "description": "Agent's response message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "reply"
+        ],
+        "title": "ChatSuccessResponse",
+        "description": "Successful chat response with agent reply.",
+        "example": {
+          "reply": "I've added a health check endpoint at `/healthz` that returns `{\"status\": \"ok\", \"name\": \"kovi\"}`. The endpoint is now available.",
+          "status": "ok"
+        }
+      },
+      "ConfirmAppliedResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "description": "Response status"
+          },
+          "reply": {
+            "type": "string",
+            "title": "Reply",
+            "description": "User-facing message"
+          },
+          "applied_files": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applied Files",
+            "description": "List of files that were modified"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch",
+            "description": "Git branch name created for the changes"
+          },
+          "pr_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Url",
+            "description": "URL to the created draft pull request"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail",
+            "description": "Additional details from the apply operation"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "reply"
+        ],
+        "title": "ConfirmAppliedResponse",
+        "description": "Response when proposals are successfully applied.",
+        "example": {
+          "applied_files": [
+            "agent/main.py"
+          ],
+          "branch": "kovi/abc123-health-check",
+          "detail": "Successfully applied changes and created PR #42",
+          "pr_url": "https://github.com/org/repo/pull/42",
+          "reply": "Successfully applied changes and created PR #42",
+          "status": "ok"
+        }
+      },
+      "ConfirmApprovedNoProposalsResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "approved",
+            "title": "Status",
+            "description": "Response status"
+          },
+          "reply": {
+            "type": "string",
+            "title": "Reply",
+            "description": "User-facing message"
+          },
+          "applied": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Applied",
+            "description": "List of applied files (empty)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "reply"
+        ],
+        "title": "ConfirmApprovedNoProposalsResponse",
+        "description": "Response when approved but no proposals to apply.",
+        "example": {
+          "applied": [],
+          "reply": "No pending proposals to apply.",
+          "status": "approved"
+        }
+      },
+      "ConfirmErrorResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "error",
+            "title": "Status",
+            "description": "Response status"
+          },
+          "reply": {
+            "type": "string",
+            "title": "Reply",
+            "description": "User-facing error message"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Technical error details"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "reply",
+          "detail"
+        ],
+        "title": "ConfirmErrorResponse",
+        "description": "Response when apply operation fails.",
+        "example": {
+          "detail": "apply-agent timed out",
+          "reply": "apply-agent timed out",
+          "status": "error"
+        }
+      },
+      "ConfirmRejectedResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "rejected",
+            "title": "Status",
+            "description": "Response status"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Explanation of the rejection"
+          },
+          "reply": {
+            "type": "string",
+            "title": "Reply",
+            "description": "User-facing message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "detail",
+          "reply"
+        ],
+        "title": "ConfirmRejectedResponse",
+        "description": "Response when proposal is rejected.",
+        "example": {
+          "detail": "Proposal discarded (not applied).",
+          "reply": "Proposal discarded.",
+          "status": "rejected"
+        }
+      },
+      "ConfirmRequest": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Session Id",
+            "description": "Session ID from the original chat request that returned a pending_confirmation status.",
+            "examples": [
+              "abc123-def456-ghi789"
+            ]
+          },
+          "approve": {
+            "type": "boolean",
+            "title": "Approve",
+            "description": "Whether to approve (true) or reject (false) the proposed changes. Approval triggers git branch creation and draft PR. Rejection discards the proposal.",
+            "examples": [
+              true,
+              false
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "approve"
+        ],
+        "title": "ConfirmRequest",
+        "description": "Request to approve or reject a pending diff proposal.",
+        "example": {
+          "approve": true,
+          "session_id": "abc123-def456-ghi789"
+        }
+      },
+      "ErrorResponse": {
+        "properties": {
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "description": "Error description"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "ErrorResponse",
+        "description": "Standard error response.",
+        "example": {
+          "detail": "message is required"
+        }
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "description": "Service status"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Service name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "name"
+        ],
+        "title": "HealthResponse",
+        "description": "Health check response indicating service liveness.",
+        "example": {
+          "name": "kovi",
+          "status": "ok"
+        }
+      },
+      "ReadyResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "ok",
+            "title": "Status",
+            "description": "Overall readiness status"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Service name"
+          },
+          "deps": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Deps",
+            "description": "Dependency health status. Each key is a dependency name, value is 'ok', 'unset', or an error description."
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "name",
+          "deps"
+        ],
+        "title": "ReadyResponse",
+        "description": "Readiness check response with dependency status.",
+        "example": {
+          "deps": {
+            "llm": "ok",
+            "qdrant": "ok"
+          },
+          "name": "kovi",
+          "status": "ok"
+        }
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "BearerToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "JWT Bearer token. Include as: `Authorization: Bearer <token>`"
+      },
+      "ApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "API Key alternative (if enabled)"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "UI",
+      "description": "Static UI and frontend assets"
+    },
+    {
+      "name": "Health",
+      "description": "Health and readiness checks for orchestration"
+    },
+    {
+      "name": "Chat",
+      "description": "Conversational interface with the engineering agent"
+    },
+    {
+      "name": "Confirmation",
+      "description": "Approve or reject proposed code changes"
+    }
+  ],
+  "security": [
+    {
+      "BearerToken": []
+    },
+    {
+      "ApiKey": []
+    }
+  ]
+}

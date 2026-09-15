@@ -1,0 +1,71 @@
+# Default values for kovanica-agent.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+
+image:
+  repository: kovanica/kovanica-agent
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+agent:
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+  env:
+    # Environment variables for the agent
+    # Note: Secrets should be handled via existingSecret or separately
+    PYTHON_VERSION: "3.12"
+    AGENT_RATE_LIMIT: "30"
+    AGENT_RATE_WINDOW_S: "60"
+    LOG_LEVEL: "INFO"
+    # Qdrant URL - if qdrant.enabled is true, this will be set to the internal service
+    # Otherwise, set it to an external Qdrant instance
+    QDRANT_URL: "http://qdrant:6333"
+  # Existing secret containing sensitive data (like API keys)
+  # If set, the chart will not create the secret and will use the existing one.
+  existingSecret: ""
+  # If existingSecret is not set, the chart will create a secret with these values.
+  # Note: It is not recommended to store plaintext passwords in values.yaml.
+  # Use existingSecret in production.
+  secretData:
+    openai-api-key: ""
+    dev-token: "dev-token-123"
+
+qdrant:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: qdrant/qdrant
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 6333
+  resources:
+    limits:
+      cpu: 200m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  persistence:
+    enabled: false
+    # If enabled, the following must be configured
+    # existingClaim: ""
+    # storageClass: ""
+    # size: 5Gi
+    # accessModes:
+    #   - ReadWriteOnce
+
+# Prometheus metrics are enabled by default in the agent via middleware
+# No additional configuration needed for the metrics endpoint itself.

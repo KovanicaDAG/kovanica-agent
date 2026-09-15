@@ -292,7 +292,7 @@ class SecretScanner:
     PATTERNS = {
         "api_key": [
             (r"(?i)(api[_-]?key|apikey)\s*[:=]\s*[\"']?([a-zA-Z0-9_\-]{20,})[\"']?", "Generic API Key"),
-            (r"(?i)(aws[_-]?access[_-]?key|aws[_-]?secret[_-]?key)\s*[:=]\s*[\"']?([A-Z0-9]{20})[\"']?", "AWS Access Key"),
+            (r"(?i)(aws[_-]?access[_-]?key(?:[_-]?id)?|aws[_-]?secret[_-]?access[_-]?key)\s*[:=]\s*[\"']?([A-Za-z0-9/+=]{20,40})[\"']?", "AWS Access Key"),
             (r"(?i)(github[_-]?token|gh[_-]?token)\s*[:=]\s*[\"']?(gh[ps]_[a-zA-Z0-9]{36})[\"']?", "GitHub Token"),
             (r"(?i)(slack[_-]?token|slack[_-]?bot[_-]?token)\s*[:=]\s*[\"']?(xox[baprs]-[a-zA-Z0-9-]{10,})[\"']?", "Slack Token"),
             (r"(?i)(discord[_-]?token|discord[_-]?bot[_-]?token)\s*[:=]\s*[\"']?([a-zA-Z0-9._-]{50,})[\"']?", "Discord Token"),
@@ -311,6 +311,7 @@ class SecretScanner:
         ],
         "connection_string": [
             (r"(?i)(connection[_-]?string|conn[_-]?str)\s*[:=]\s*[\"']([^\"']{20,})[\"']", "Connection String"),
+            (r"(?i)(database[_-]?url|db[_-]?url)\s*[:=]\s*[\"']?[^\"']*://[^@\"']+@[^\"']+", "Database Connection String"),
         ],
     }
     
@@ -523,15 +524,23 @@ class IPFilter:
     
     def remove_allowed(self, cidr: str) -> bool:
         try:
-            self.allowed_networks.remove(ipaddress.ip_network(cidr))
-            return True
+            network = ipaddress.ip_network(cidr)
+            for i, existing in enumerate(self.allowed_networks):
+                if existing == network:
+                    self.allowed_networks.pop(i)
+                    return True
+            return False
         except ValueError:
             return False
     
     def remove_blocked(self, cidr: str) -> bool:
         try:
-            self.blocked_networks.remove(ipaddress.ip_network(cidr))
-            return True
+            network = ipaddress.ip_network(cidr)
+            for i, existing in enumerate(self.blocked_networks):
+                if existing == network:
+                    self.blocked_networks.pop(i)
+                    return True
+            return False
         except ValueError:
             return False
 

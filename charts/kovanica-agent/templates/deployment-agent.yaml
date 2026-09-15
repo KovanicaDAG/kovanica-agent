@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kovanica-agent.fullname" . }}-agent
+  labels:
+    {{- include "kovanica-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kovanica-agent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: agent
+  template:
+    metadata:
+      labels:
+        {{- include "kovanica-agent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: agent
+    spec:
+      containers:
+        - name: agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PYTHON_VERSION
+              value: "{{ .Values.agent.env.PYTHON_VERSION }}"
+            - name: AGENT_RATE_LIMIT
+              value: "{{ .Values.agent.env.AGENT_RATE_LIMIT }}"
+            - name: AGENT_RATE_WINDOW_S
+              value: "{{ .Values.agent.env.AGENT_RATE_WINDOW_S }}"
+            - name: LOG_LEVEL
+              value: "{{ .Values.agent.env.LOG_LEVEL }}"
+            - name: QDRANT_URL
+              value: "{{ .Values.agent.env.QDRANT_URL }}"
+            {{- if not .Values.agent.existingSecret }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kovanica-agent.fullname" . }}-secret
+                  key: openai-api-key
+            - name: AGENT_DEV_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kovanica-agent.fullname" . }}-secret
+                  key: dev-token
+            {{- end }}
+          resources:
+{{ toYaml .Values.agent.resources | indent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5

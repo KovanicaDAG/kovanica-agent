@@ -1,0 +1,19 @@
+{{- if .Values.qdrant.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kovanica-agent.fullname" . }}-qdrant
+  labels:
+    {{- include "kovanica-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: qdrant
+spec:
+  type: {{ .Values.qdrant.service.type }}
+  ports:
+    - port: {{ .Values.qdrant.service.port }}
+      targetPort: {{ .Values.qdrant.service.port }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "kovanica-agent.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: qdrant
+{{- end }}

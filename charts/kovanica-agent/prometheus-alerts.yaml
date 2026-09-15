@@ -1,0 +1,117 @@
+groups:
+  - name: kovanica-agent.rules
+    rules:
+      # Alert if HTTP error rate is too high (>5% errors over 5m)
+      - alert: KovanicaAgentHighErrorRate
+        expr: |
+          sum by (job) (
+            rate(kovanica_agent_requests_total{http_status=~"5.."}[5m])
+          ) /
+          sum by (job) (
+            rate(kovanica_agent_requests_total[5m])
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate in Kovanica Agent ({{ $labels.job }})"
+          description: "HTTP error rate is {{ $value | printf \"%.1%\" }} for the last 5 minutes."
+
+      # Alert if request latency is high (95th percentile > 2s)
+      - alert: KovanicaAgentHighLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum by (job, le) (
+              rate(kovanica_agent_request_latency_seconds_bucket[5m])
+            )
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High request latency in Kovanica Agent ({{ $labels.job }})"
+          description: "95th percentile request latency is {{ $value | printf \"%.2fs\" }} for the last 5 minutes."
+
+      # Alert if agent sessions drop to zero (if we expect at least one)
+      - alert: KovanicaAgentNoSessions
+        expr: |
+          kovanica_agent_sessions_active == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No active sessions in Kovanica Agent ({{ $labels.job }})"
+          description: "The agent has no active sessions for over 1 minute."
+
+      # Alert if LLM error rate is high
+      - alert: KovanicaAgentLLMHighErrorRate
+        expr: |
+          sum by (job, model, provider) (
+            rate(kovanica_agent_llm_token_usage_total{token_type="error"}[5m])
+          ) /
+          sum by (job, model, provider) (
+            rate(kovanica_agent_llm_token_usage_total[5m])
+          ) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High LLM error rate in Kovanica Agent ({{ $labels.job }})"
+          description: "LLM error rate is {{ $value | printf \"%.1%\" }} for {{ $labels.model }} from {{ $labels.provider }} over the last 5 minutes."
+
+      # Alert if RAG cache miss rate is high (>50% misses)
+      - alert: KovanicaAgentLowRCacheHitRate
+        expr: |
+          sum by (job) (
+            rate(kovanica_agent_rag_cache_misses_total[5m])
+          ) /
+          sum by (job) (
+            rate(kovanica_agent_rag_cache_hits_total[5m]) +
+            rate(kovanica_agent_rag_cache_misses_total[5m])
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "Low RAG cache hit rate in Kovanica Agent ({{ $labels.job }})"
+          description: "RAG cache miss rate is {{ $value | printf \"%.1%\" }} for the last 5 minutes. Consider reviewing RAG query patterns or increasing cache size."
+
+      # Alert if patch rejection rate is high (>30% of proposed patches rejected)
+      - alert: KovanicaAgentHighPatchRejectionRate
+        expr: |
+          sum by (job) (
+            rate(kovanica_agent_patches_rejected_total[5m])
+          ) /
+          sum by (job) (
+            rate(kovanica_agent_patches_proposed_total[5m])
+          ) > 0.3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High patch rejection rate in Kovanica Agent ({{ $labels.job }})"
+          description: "{{ $value | printf \"%.1%\" }} of proposed patches are being rejected over the last 10 minutes. Review patch quality or user feedback patterns."
+
+      # Alert if uptime resets unexpectedly (agent restarted)
+      - alert: KovanicaAgentUnexpectedRestart
+        expr: |
+          kovanica_agent_uptime_seconds < 300
+        for: 2m
+        labels:
+          severity: info
+        annotations:
+          summary: "Kovanica Agent restarted ({{ $labels.job }})"
+          description: "Agent uptime is less than 5 minutes, indicating a recent restart."
+
+      # Alert if subagent spawn rate is very high (potential runaway)
+      - alert: KovanicaAgentHighSubagentSpawnRate
+        expr: |
+          sum by (job) (
+            rate(kovanica_agent_subagent_spawned_total[5m])
+          ) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High subagent spawn rate in Kovanica Agent ({{ $labels.job }})"
+          description: "Spawning more than 10 subagents per minute over the last 5 minutes. Check for runaway agent behavior."

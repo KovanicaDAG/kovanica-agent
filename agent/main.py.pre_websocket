@@ -1,2086 +1,1008 @@
 """
-
 FastAPI entrypoint. Routes:
-
   GET  /         - Kovanica chat UI
-
   GET  /healthz  - liveness
-
   GET  /readyz   - dependency probe
-
   POST /chat     - send a message, get the agent's response (or a
-
                     "pending_confirmation" if it proposed a diff)
-
   POST /confirm  - approve or reject a pending diff, resumes the graph
 
-
-
 Role is derived from auth, not from the request body. The `Authorization`
-
 header is verified with real JWT auth (see auth.py): JWKS mode when
-
 AUTH_JWKS_URL is set, dev-token mode otherwise. Only `dev` may confirm.
 
-
-
 /confirm -> apply.gate: on approval, staged proposals (patchstore) are turned
-
 into a throwaway git branch + draft PR by apply.py (fail-closed behind
-
 AGENT_GIT_APPLY_ENABLED == "1"). On rejection or absence of proposals the
-
 proposal store is cleared/resumed without touching any git repo.
-
 """
 
-
-
 import json
-
 import os
-
 import time
-
 from collections import defaultdict, deque
-
 from dataclasses import dataclass
-
 from functools import wraps
-
 from pathlib import Path
-
 from typing import Callable, Type, Optional, List, Literal, Any
 
-
-
 import requests
-
-import asyncio
-
-from fastapi import FastAPI, Header, HTTPException, Request, PlainTextResponse, WebSocket, WebSocketDisconnect
-
+from fastapi import FastAPI, Header, HTTPException, Request, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
-
 from fastapi.responses import FileResponse
-
 from fastapi.staticfiles import StaticFiles
-
 from fastapi.security import HTTPBearer, APIKeyHeader
-
 from pydantic import BaseModel, Field, ConfigDict
 
-
-
 from auth import verify_token
-
 from graph import build_graph
-
 import patchstore as _patchstore
-
 from metrics import REQUEST_COUNT, REQUEST_LATENCY, AGENT_SESSIONS_ACTIVE, AGENT_MESSAGES_PROCESSED, AGENT_TOOL_USAGE, AGENT_SUBAGENT_SPAWNED, AGENT_PATCHES_PROPOSED, AGENT_PATCHES_APPROVED, AGENT_PATCHES_REJECTED, LLM_REQUEST_LATENCY, LLM_TOKEN_USAGE, RAG_QUERY_LATENCY, RAG_CACHE_HITS, RAG_CACHE_MISSES, AGENT_UPTIME_SECONDS, update_uptime, get_metrics
-# =============================================================================
-# Vault Configuration for Secret Management
-# =============================================================================
-
-try:
-    from vault_client import get_openai_api_key_from_vault
-except ImportError:
-    # If vault_client is not available (e.g., hvac not installed), define a dummy function
-    def get_openai_api_key_from_vault():
-        return None
-
-# Try to get OpenAI API key from Vault
-openai_api_key = get_openai_api_key_from_vault()
-if openai_api_key is None:
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
-if openai_api_key:
-    os.environ["OPENAI_API_KEY"] = openai_api_key
-
-
-
 
 # =============================================================================
-
 # OpenAPI Configuration
-
 # =============================================================================
-
-
 
 app = FastAPI(
-
     title="Kovanica Engineering Agent API",
-
     version="1.0.0",
-
     description="""
-
 ## Kovanica Engineering Agent API
 
-
-
 The Kovanica Agent is an AI-powered engineering assistant that helps developers
-
 with code changes, reviews, and repository operations through a conversational interface.
 
-
-
 ### Features
-
 - **Chat Interface**: Natural language interaction with the engineering agent
-
 - **Diff Proposals**: Agent proposes code changes as unified diffs
-
 - **Human-in-the-loop**: Changes require explicit approval before application
-
 - **Git Integration**: Approved changes create branches and draft PRs
-
 - **Session Management**: Conversation state persisted per session
 
-
-
 ### Authentication
-
 The API uses JWT-based authentication with two modes:
-
 - **JWKS Mode**: Production mode using a JWKS endpoint (set `AUTH_JWKS_URL`)
-
 - **Dev Token Mode**: Development mode with a simple token (default)
-
-
 
 Include the `Authorization: Bearer <token>` header in all requests.
 
-
-
 ### Rate Limiting
-
 - Default: 30 requests per 60 seconds per IP
-
 - Configurable via `AGENT_RATE_LIMIT` and `AGENT_RATE_WINDOW_S` environment variables
 
-
-
 ### Error Responses
-
 All endpoints may return standard HTTP error codes:
-
 - `400` - Bad Request (invalid input)
-
 - `401` - Unauthorized (missing/invalid token)
-
 - `403` - Forbidden (insufficient role)
-
 - `429` - Too Many Requests (rate limited)
-
 - `500` - Internal Server Error
-
 - `503` - Service Unavailable (dependency failure)
-
 """,
-
     contact={
-
         "name": "Kovanica Team",
-
         "url": "https://kovanica.online",
-
     },
-
     license_info={
-
         "name": "MIT",
-
         "url": "https://opensource.org/licenses/MIT",
-
     },
-
     openapi_tags=[
-
         {
-
             "name": "UI",
-
             "description": "Static UI and frontend assets",
-
         },
-
         {
-
             "name": "Health",
-
             "description": "Health and readiness checks for orchestration",
-
         },
-
         {
-
             "name": "Chat",
-
             "description": "Conversational interface with the engineering agent",
-
         },
-
         {
-
             "name": "Confirmation",
-
             "description": "Approve or reject proposed code changes",
-
         },
-
     ],
-
     servers=[
-
         {"url": "https://kovi.kovanica.online", "description": "Production server"},
-
         {"url": "http://localhost:8080", "description": "Local development server"},
-
     ],
-
 )
 
-
-
 # Add security schemes to OpenAPI
-
 def custom_openapi():
-
     if app.openapi_schema:
-
         return app.openapi_schema
-
     from fastapi.openapi.utils import get_openapi
-
     openapi_schema = get_openapi(
-
         title=app.title,
-
         version=app.version,
-
         description=app.description,
-
         routes=app.routes,
-
         tags=app.openapi_tags,
-
         servers=app.servers,
-
     )
-
     openapi_schema["components"]["securitySchemes"] = {
-
         "BearerToken": {
-
             "type": "http",
-
             "scheme": "bearer",
-
             "bearerFormat": "JWT",
-
             "description": "JWT Bearer token. Include as: `Authorization: Bearer <token>`"
-
         },
-
         "ApiKey": {
-
             "type": "apiKey",
-
             "in": "header",
-
             "name": "X-API-Key",
-
             "description": "API Key alternative (if enabled)"
-
         }
-
     }
-
     # Apply security globally
-
     openapi_schema["security"] = [
-
         {"BearerToken": []},
-
         {"ApiKey": []}
-
     ]
-
     app.openapi_schema = openapi_schema
-
     return app.openapi_schema
-
-
 
 app.openapi = custom_openapi
 
-
-
 # Security schemes
-
 bearer_scheme = HTTPBearer(
-
     scheme_name="BearerToken",
-
     description="JWT Bearer token. Include as: `Authorization: Bearer <token>`",
-
     auto_error=False,
-
 )
-
-
 
 api_key_scheme = APIKeyHeader(
-
     name="X-API-Key",
-
     scheme_name="ApiKey",
-
     description="API Key alternative (if enabled)",
-
     auto_error=False,
-
 )
-
-
 
 agent_graph = build_graph()
 
-
-
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-
 AUDIT_LOG = Path(os.environ.get("AGENT_AUDIT_LOG", "/data/audit.jsonl"))
-
 AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
 
-
-
 _CORS = [
-
     o.strip()
-
     for o in os.environ.get(
-
         "CORS_ORIGINS",
-
         "https://kovi.kovanica.online,https://kovanica.online,"
-
         "https://www.kovanica.online,https://explorer.kovanica.online",
-
     ).split(",")
-
     if o.strip()
-
 ]
-
 app.add_middleware(
-
     CORSMiddleware,
-
     allow_origins=_CORS,
-
     allow_credentials=True,
-
     allow_methods=["GET", "POST", "OPTIONS"],
-
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
-
 )
 
-
-
 # Metrics middleware
-
 @app.middleware("http")
-
 async def metrics_middleware(request: Request, call_next):
-
     start_time = time.time()
-
     response = await call_next(request)
-
     process_time = time.time() - start_time
-
     
-
     method = request.method
-
     endpoint = request.url.path
-
     
-
     REQUEST_COUNT.labels(method=method, endpoint=endpoint, http_status=response.status_code).inc()
-
     REQUEST_LATENCY.labels(method=method, endpoint=endpoint).observe(process_time)
-
     
-
     return response
 
 
-
-
-
 _RATE_WINDOW_S = int(os.environ.get("AGENT_RATE_WINDOW_S", "60") or 60)
-
 _RATE_LIMIT = int(os.environ.get("AGENT_RATE_LIMIT", "30") or 30)
-
 _hits: dict[str, deque[float]] = defaultdict(deque)
 
 
-
-
-
 def _client_ip(request: Request) -> str:
-
     forwarded = request.headers.get("x-forwarded-for") or ""
-
     if forwarded:
-
         return forwarded.split(",")[0].strip()
-
     return request.client.host if request.client else "unknown"
 
 
-
-
-
 def _rate_ok(ip: str) -> bool:
-
     now = time.time()
-
     q = _hits[ip]
-
     while q and now - q[0] > _RATE_WINDOW_S:
-
         q.popleft()
-
     if len(q) >= _RATE_LIMIT:
-
         return False
-
     q.append(now)
-
     return True
 
 
-
-
-
 def audit(event: dict) -> None:
-
     event["ts"] = time.time()
-
     with AUDIT_LOG.open("a") as f:
-
         f.write(json.dumps(event) + "\n")
 
 
-
-
-
 # =============================================================================
-
 # Pydantic Models - Request/Response
-
 # =============================================================================
-
-
 
 class ChatRequest(BaseModel):
-
     """Request to send a message to the engineering agent."""
-
     model_config = ConfigDict(
-
         json_schema_extra={
-
             "example": {
-
                 "session_id": "abc123-def456-ghi789",
-
                 "message": "Add a health check endpoint to the FastAPI app"
-
             }
-
         }
-
     )
-
     
-
     session_id: str = Field(
-
         ...,
-
         description="Unique session identifier for conversation continuity. "
-
                     "Generate a new UUID for each new conversation.",
-
         min_length=1,
-
         max_length=128,
-
         examples=["abc123-def456-ghi789", "session-2024-01-15-001"]
-
     )
-
     message: str = Field(
-
         ...,
-
         description="User message to the agent. Can be a question, task request, "
-
                     "or follow-up to a previous response.",
-
         min_length=1,
-
         max_length=8000,
-
         examples=[
-
             "Add a health check endpoint to the FastAPI app",
-
             "Review the authentication module for security issues",
-
             "Create a new API endpoint for user management"
-
         ]
-
     )
-
-
-
 
 
 class ConfirmRequest(BaseModel):
-
     """Request to approve or reject a pending diff proposal."""
-
     model_config = ConfigDict(
-
         json_schema_extra={
-
             "example": {
-
                 "session_id": "abc123-def456-ghi789",
-
                 "approve": True
-
             }
-
         }
-
     )
-
     
-
     session_id: str = Field(
-
         ...,
-
         description="Session ID from the original chat request that returned "
-
                     "a pending_confirmation status.",
-
         min_length=1,
-
         max_length=128,
-
         examples=["abc123-def456-ghi789"]
-
     )
-
     approve: bool = Field(
-
         ...,
-
         description="Whether to approve (true) or reject (false) the proposed changes. "
-
                     "Approval triggers git branch creation and draft PR. "
-
                     "Rejection discards the proposal.",
-
         examples=[True, False]
-
     )
-
-
-
 
 
 # Response Models
 
-
-
 class HealthResponse(BaseModel):
-
     """Health check response indicating service liveness."""
-
     model_config = ConfigDict(
-
         json_schema_extra={
-
             "example": {
-
                 "status": "ok",
-
                 "name": "kovi"
-
             }
-
         }
-
     )
-
     
-
     status: Literal["ok"] = Field(..., description="Service status")
-
     name: str = Field(..., description="Service name")
-
-
-
 
 
 class ReadyResponse(BaseModel):
-
     """Readiness check response with dependency status."""
-
     model_config = ConfigDict(
-
         json_schema_extra={
-
             "example": {
-
                 "status": "ok",
-
                 "name": "kovi",
-
                 "deps": {
-
                     "qdrant": "ok",
-
                     "llm": "ok"
-
                 }
-
             }
-
         }
-
     )
-
     
-
     status: Literal["ok"] = Field(..., description="Overall readiness status")
-
     name: str = Field(..., description="Service name")
-
     deps: dict[str, str] = Field(
-
         ...,
-
         description="Dependency health status. Each key is a dependency name, "
-
                     "value is 'ok', 'unset', or an error description."
-
     )
-
-
-
 
 
 class ChatSuccessResponse(BaseModel):
-
     """Successful chat response with agent reply."""
-
     model_config = ConfigDict(
-
         json_schema_extra={
-
             "example": {
-
                 "status": "ok",
-
                 "reply": "I've added a health check endpoint at `/healthz` that returns `{\"status\": \"ok\", \"name\": \"kovi\"}`. The endpoint is now available."
-
             }
-
         }
-
     )
-
     
-
     status: Literal["ok"] = Field(..., description="Response status")
-
     reply: str = Field(..., description="Agent's response message")
 
 
-
-
-
 class ChatPendingConfirmationResponse(BaseModel):
-
     """Response when agent proposes changes requiring confirmation."""
-
     model_config = ConfigDict(
-
         json_schema_extra={
-
             "example": {
-
                 "status": "pending_confirmation",
-
                 "detail": "Agent proposed a repo change. Review and POST /confirm.",
-
                 "messages": [
-
                     "I'll add a health check endpoint to the FastAPI app.",
-
                     "Here's the proposed change:",
-
                     "```diff\n+ @app.get(\"/healthz\")\n+ def healthz():\n+     return {\"status\": \"ok\", \"name\": \"kovi\"}\n```"
-
                 ]
-
             }
-
         }
-
     )
-
     
-
     status: Literal["pending_confirmation"] = Field(..., description="Response status")
-
     detail: str = Field(..., description="Human-readable explanation of next steps")
-
     messages: List[str] = Field(
-
         ...,
-
         description="Recent conversation messages including the proposed diff"
-
     )
-
-
-
 
 
 class ConfirmRejectedResponse(BaseModel):
-
     """Response when proposal is rejected."""
-
     model_config = ConfigDict(
-
         json_schema_extra={
-
             "example": {
-
                 "status": "rejected",
-
                 "detail": "Proposal discarded (not applied).",
-
                 "reply": "Proposal discarded."
-
             }
-
         }
-
     )
-
     
-
     status: Literal["rejected"] = Field(..., description="Response status")
-
     detail: str = Field(..., description="Explanation of the rejection")
-
     reply: str = Field(..., description="User-facing message")
-
-
-
 
 
 class ConfirmApprovedNoProposalsResponse(BaseModel):
-
     """Response when approved but no proposals to apply."""
-
     model_config = ConfigDict(
-
         json_schema_extra={
-
             "example": {
-
                 "status": "approved",
-
                 "reply": "No pending proposals to apply.",
-
                 "applied": []
-
             }
-
         }
-
     )
-
     
-
     status: Literal["approved"] = Field(..., description="Response status")
-
     reply: str = Field(..., description="User-facing message")
-
     applied: List[str] = Field(default_factory=list, description="List of applied files (empty)")
 
 
-
-
-
 class ConfirmAppliedResponse(BaseModel):
-
     """Response when proposals are successfully applied."""
-
     model_config = ConfigDict(
-
         json_schema_extra={
-
             "example": {
-
                 "status": "ok",
-
                 "reply": "Successfully applied changes and created PR #42",
-
                 "applied_files": ["agent/main.py"],
-
                 "branch": "kovi/abc123-health-check",
-
                 "pr_url": "https://github.com/org/repo/pull/42",
-
                 "detail": "Successfully applied changes and created PR #42"
-
             }
-
         }
-
     )
-
     
-
     status: Literal["ok"] = Field(..., description="Response status")
-
     reply: str = Field(..., description="User-facing message")
-
     applied_files: Optional[List[str]] = Field(
-
         default=None,
-
         description="List of files that were modified"
-
     )
-
     branch: Optional[str] = Field(
-
         default=None,
-
         description="Git branch name created for the changes"
-
     )
-
     pr_url: Optional[str] = Field(
-
         default=None,
-
         description="URL to the created draft pull request"
-
     )
-
     detail: Optional[str] = Field(
-
         default=None,
-
         description="Additional details from the apply operation"
-
     )
-
-
-
 
 
 class ConfirmErrorResponse(BaseModel):
-
     """Response when apply operation fails."""
-
     model_config = ConfigDict(
-
         json_schema_extra={
-
             "example": {
-
                 "status": "error",
-
                 "reply": "apply-agent timed out",
-
                 "detail": "apply-agent timed out"
-
             }
-
         }
-
     )
-
     
-
     status: Literal["error"] = Field(..., description="Response status")
-
     reply: str = Field(..., description="User-facing error message")
-
     detail: str = Field(..., description="Technical error details")
 
 
-
-
-
 class ErrorResponse(BaseModel):
-
     """Standard error response."""
-
     model_config = ConfigDict(
-
         json_schema_extra={
-
             "example": {
-
                 "detail": "message is required"
-
             }
-
         }
-
     )
-
     
-
     detail: str = Field(..., description="Error description")
 
 
-
-
-
 # Union types for OpenAPI schema generation
-
 ChatResponse = ChatSuccessResponse | ChatPendingConfirmationResponse
-
 ConfirmResponse = (
-
     ConfirmRejectedResponse 
-
     | ConfirmApprovedNoProposalsResponse 
-
     | ConfirmAppliedResponse 
-
     | ConfirmErrorResponse
-
 )
 
 
-
-
-
 # =============================================================================
-
 # Action Registry
-
 # =============================================================================
-
-
 
 @dataclass
-
 class ActionSpec:
-
     path: str
-
     model: Type[BaseModel]
-
     handler: Callable
-
     summary: str = ""
-
     require_dev: bool = False
-
-
-
 
 
 _ACTION_REGISTRY: dict[str, ActionSpec] = {}
 
 
-
-
-
 def register_action(
-
     path: str,
-
     model: Type[BaseModel],
-
     *,
-
     summary: str = "",
-
     description: str = "",
-
     require_dev: bool = False,
-
     tags: Optional[List[str]] = None,
-
     responses: Optional[dict] = None,
-
 ) -> Callable:
-
     """Decorator that registers a POST action on ``app`` and in the registry.
-
-
 
     Usage::
 
-
-
         @register_action("/chat", ChatRequest, summary="Send a message", tags=["Chat"])
-
         async def chat(req: ChatRequest, request: Request,
-
                        authorization: str | None = Header(default=None)):
-
             ...
-
     """
 
-
-
     def decorator(handler: Callable) -> Callable:
-
         if require_dev:
-
             @wraps(handler)
-
             async def guarded(
-
                 req,
-
                 request: Request,
-
                 authorization: str | None = Header(default=None),
-
             ):
-
                 role = verify_token(authorization)
-
                 if role != "dev":
-
                     raise HTTPException(
-
                         status_code=403, detail="Only dev role may call this action"
-
                     )
-
                 return await handler(req, request, authorization)
 
-
-
             enforced_handler = guarded
-
         else:
-
             enforced_handler = handler
 
-
-
         # Build response model documentation
-
         route_kwargs = {"summary": summary or path}
-
         if description:
-
             route_kwargs["description"] = description
-
         if tags:
-
             route_kwargs["tags"] = tags
-
         if responses:
-
             route_kwargs["responses"] = responses
 
-
-
         app.post(path, **route_kwargs)(enforced_handler)
-
         _ACTION_REGISTRY[path] = ActionSpec(
-
             path=path,
-
             model=model,
-
             handler=enforced_handler,
-
             summary=summary,
-
             require_dev=require_dev,
-
         )
-
         return enforced_handler
-
-
 
     return decorator
 
 
-
-
-
 def list_actions() -> list[ActionSpec]:
-
     """Return the currently registered actions, in registration order."""
-
     return list(_ACTION_REGISTRY.values())
 
 
-
-
-
 # =============================================================================
-
 # Static + Health Endpoints
-
 # =============================================================================
-
-
 
 @app.get(
-
     "/",
-
     response_class=FileResponse,
-
     tags=["UI"],
-
     summary="Serve the Kovanica chat UI",
-
     description="Returns the main HTML interface for interacting with the agent.",
-
     responses={
-
         200: {"description": "HTML page served successfully"},
-
         404: {"model": ErrorResponse, "description": "UI not packaged"},
-
     },
-
 )
-
 def index() -> FileResponse:
-
     """Serve the Kovanica chat UI."""
-
     index_path = STATIC_DIR / "index.html"
-
     if not index_path.is_file():
-
         raise HTTPException(status_code=404, detail="UI not packaged")
-
     return FileResponse(index_path)
 
 
-
-
-
 if STATIC_DIR.is_dir():
-
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-
-
-
 @app.get(
-
     "/healthz",
-
     response_model=HealthResponse,
-
     tags=["Health"],
-
     summary="Liveness probe",
-
     description="Simple liveness check. Returns 200 if the service is running. "
-
                 "Use for Kubernetes liveness probes.",
-
     responses={
-
         200: {"model": HealthResponse, "description": "Service is alive"},
-
     },
-
 )
-
 def healthz() -> HealthResponse:
-
     """Liveness probe endpoint."""
-
     return HealthResponse(status="ok", name="kovi")
 
 
-
-
-
 @app.get(
-
     "/readyz",
-
     response_model=ReadyResponse,
-
     tags=["Health"],
-
     summary="Readiness probe",
-
     description="Checks connectivity to dependencies (Qdrant, LLM). "
-
                 "Use for Kubernetes readiness probes. "
-
                 "Returns dependency status for each configured service.",
-
     responses={
-
         200: {"model": ReadyResponse, "description": "Readiness status with dependencies"},
-
     },
-
 )
-
 def readyz() -> ReadyResponse:
-
     """Best-effort dependency probe. Liveness is /healthz; this is informational."""
-
     qdrant = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-
     llm = os.environ.get("LLM_BASE_URL") or os.environ.get("VLLM_BASE_URL", "")
-
     deps: dict[str, str] = {"qdrant": "unknown", "llm": "unknown"}
-
     try:
-
         import requests
-
-
 
         r = requests.get(f"{qdrant.rstrip('/')}/readyz", timeout=2)
-
         deps["qdrant"] = "ok" if r.status_code < 500 else f"http {r.status_code}"
-
     except Exception as exc:
-
         deps["qdrant"] = f"error: {exc.__class__.__name__}"
-
     try:
-
         import requests
 
-
-
         if llm:
-
             r = requests.get(f"{llm.rstrip('/')}/models", timeout=2)
-
             deps["llm"] = "ok" if r.status_code < 500 else f"http {r.status_code}"
-
         else:
-
             deps["llm"] = "unset"
-
     except Exception as exc:
-
         deps["llm"] = f"error: {exc.__class__.__name__}"
-
     return ReadyResponse(status="ok", name="kovi", deps=deps)
 
 
-
-
-
 # =============================================================================
-
 # Prometheus Metrics Endpoint
-
 # =============================================================================
-
-
 
 @app.get(
-
     "/metrics",
-
     response_class=PlainTextResponse,
-
     tags=["Metrics"],
-
     summary="Prometheus metrics endpoint",
-
     description="Returns Prometheus metrics for monitoring and alerting.",
-
     responses={
-
         200: {
-
             "description": "Prometheus metrics",
-
             "content": {
-
                 "text/plain": {}
-
             }
-
         }
-
     },
-
 )
-
 async def metrics() -> PlainTextResponse:
-
     """Prometheus metrics endpoint."""
-
     return PlainTextResponse(content=get_metrics(), media_type=CONTENT_TYPE_LATEST)
 
 
-
-
-
-
 # =============================================================================
-# WebSocket Endpoint
-# =============================================================================
-active_websocket_connections: set[WebSocket] = set()
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    active_websocket_connections.add(websocket)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            try:
-                request_data = json.loads(data)
-                session_id = request_data.get("session_id", "websocket-session")
-                message = request_data.get("message", "")
-                if not message:
-                    await websocket.send_json({"error": "Message is required"})
-                    continue
-
-                config = {
-                    "configurable": {
-                        "thread_id": session_id,
-                    }
-                }
-                result = agent_graph.invoke(
-                    {"messages": [{"role": "user", "content": message}]},
-                    config=config,
-                )
-                agent_message = result["messages"][-1]["content"]
-                role = result["messages"][-1].get("role", "assistant")
-
-                await websocket.send_json(
-                    {
-                        "session_id": session_id,
-                        "role": role,
-                        "event": "chat",
-                        "message": agent_message,
-                    }
-                )
-            except json.JSONDecodeError:
-                await websocket.send_json({"error": "Invalid JSON"})
-            except Exception as e:
-                await websocket.send_json({"error": str(e)})
-    except WebSocketDisconnect:
-        active_websocket_connections.discard(websocket)
-    except Exception as e:
-        active_websocket_connections.discard(websocket)
-        print("WebSocket error: {}".format(e))
-# =============================================================================
-
 # Registered POST Actions
-
 # =============================================================================
-
-
 
 # Common response definitions for chat endpoint
-
 CHAT_RESPONSES = {
-
     200: {
-
         "description": "Successful response",
-
         "content": {
-
             "application/json": {
-
                 "examples": {
-
                     "success": {
-
                         "summary": "Normal reply",
-
                         "value": {
-
                             "status": "ok",
-
                             "reply": "I've added a health check endpoint at `/healthz` that returns `{\"status\": \"ok\", \"name\": \"kovi\"}`. The endpoint is now available."
-
                         }
-
                     },
-
                     "pending_confirmation": {
-
                         "summary": "Proposed changes requiring approval",
-
                         "value": {
-
                             "status": "pending_confirmation",
-
                             "detail": "Agent proposed a repo change. Review and POST /confirm.",
-
                             "messages": [
-
                                 "I'll add a health check endpoint to the FastAPI app.",
-
                                 "Here's the proposed change:",
-
                                 "```diff\n+ @app.get(\"/healthz\")\n+ def healthz():\n+     return {\"status\": \"ok\", \"name\": \"kovi\"}\n```"
-
                             ]
-
                         }
-
                     }
-
                 }
-
             }
-
         }
-
     },
-
     400: {"model": ErrorResponse, "description": "Bad request (empty message)"},
-
     401: {"model": ErrorResponse, "description": "Unauthorized (invalid/missing token)"},
-
     403: {"model": ErrorResponse, "description": "Forbidden (requires dev role)"},
-
     413: {"model": ErrorResponse, "description": "Message too long (>8000 chars)"},
-
     429: {"model": ErrorResponse, "description": "Rate limited"},
-
     500: {"model": ErrorResponse, "description": "Internal server error"},
-
 }
 
-
-
 @register_action(
-
     "/chat",
-
     ChatRequest,
-
     summary="Send a message and get the agent's response",
-
     description="""
-
 Send a message to the Kovanica Engineering Agent and receive a response.
 
-
-
 The agent can:
-
 - Answer questions about the codebase
-
 - Propose code changes as unified diffs
-
 - Explain existing code
-
 - Suggest improvements
 
-
-
 If the agent proposes changes, it returns a `pending_confirmation` status.
-
 You must then call `POST /confirm` with `approve: true` to apply the changes,
-
 or `approve: false` to reject them.
 
-
-
 **Authentication**: Requires valid JWT token with `dev` role.
-
 **Rate Limited**: 30 requests per 60 seconds per IP.
-
 """,
-
     require_dev=True,
-
     tags=["Chat"],
-
     responses=CHAT_RESPONSES,
-
 )
-
 async def chat(
-
     req: ChatRequest,
-
     request: Request,
-
     authorization: str | None = Header(default=None),
-
 ) -> ChatResponse:
-
     if not _rate_ok(_client_ip(request)):
-
         raise HTTPException(status_code=429, detail="Too many requests")
-
     message = (req.message or "").strip()
-
     if not message:
-
         raise HTTPException(status_code=400, detail="message is required")
-
     if len(message) > 8000:
-
         raise HTTPException(status_code=413, detail="message too long")
 
-
-
     role = verify_token(authorization)
-
     config = {"configurable": {"thread_id": req.session_id}}
 
-
-
     result = agent_graph.invoke(
-
         {"messages": [("user", message)], "role": role, "pending_confirmation": None},
-
         config=config,
-
     )
-
-
 
     audit(
-
         {"session_id": req.session_id, "role": role, "event": "chat", "message": message[:500]}
-
     )
 
-
-
     if result.get("pending_confirmation"):
-
         return ChatPendingConfirmationResponse(
-
             status="pending_confirmation",
-
             detail="Agent proposed a repo change. Review and POST /confirm.",
-
             messages=[str(m.content) for m in result["messages"][-3:]],
-
         )
-
-
 
     last = result["messages"][-1]
-
     reply = getattr(last, "content", last)
-
     if isinstance(reply, list):
-
         reply = "".join(
-
             (p.get("text", "") if isinstance(p, dict) else str(p)) for p in reply
-
         )
-
     elif not isinstance(reply, str):
-
         reply = str(reply)
-
     return ChatSuccessResponse(status="ok", reply=reply)
 
 
-
-
-
 # Common response definitions for confirm endpoint
-
 CONFIRM_RESPONSES = {
-
     200: {
-
         "description": "Successful response",
-
         "content": {
-
             "application/json": {
-
                 "examples": {
-
                     "rejected": {
-
                         "summary": "Proposal rejected",
-
                         "value": {
-
                             "status": "rejected",
-
                             "detail": "Proposal discarded (not applied).",
-
                             "reply": "Proposal discarded."
-
                         }
-
                     },
-
                     "approved_no_proposals": {
-
                         "summary": "Approved but no proposals to apply",
-
                         "value": {
-
                             "status": "approved",
-
                             "reply": "No pending proposals to apply.",
-
                             "applied": []
-
                         }
-
                     },
-
                     "applied": {
-
                         "summary": "Changes applied and PR created",
-
                         "value": {
-
                             "status": "ok",
-
                             "reply": "Successfully applied changes and created PR #42",
-
                             "applied_files": ["agent/main.py"],
-
                             "branch": "kovi/abc123-health-check",
-
                             "pr_url": "https://github.com/org/repo/pull/42",
-
                             "detail": "Successfully applied changes and created PR #42"
-
                         }
-
                     },
-
                     "error": {
-
                         "summary": "Apply operation failed",
-
                         "value": {
-
                             "status": "error",
-
                             "reply": "apply-agent timed out",
-
                             "detail": "apply-agent timed out"
-
                         }
-
                     }
-
                 }
-
             }
-
         }
-
     },
-
     400: {"model": ErrorResponse, "description": "Bad request"},
-
     401: {"model": ErrorResponse, "description": "Unauthorized (invalid/missing token)"},
-
     403: {"model": ErrorResponse, "description": "Forbidden (requires dev role)"},
-
     429: {"model": ErrorResponse, "description": "Rate limited"},
-
     500: {"model": ErrorResponse, "description": "Internal server error"},
-
     503: {"model": ErrorResponse, "description": "Apply agent unavailable"},
-
 }
 
-
-
 @register_action(
-
     "/confirm",
-
     ConfirmRequest,
-
     summary="Approve or reject a pending diff proposal",
-
     description="""
-
 Approve or reject a pending code change proposal from the agent.
 
-
-
 When the agent proposes changes (returns `pending_confirmation` from `/chat`),
-
 this endpoint must be called to either:
-
 - **Approve** (`approve: true`): Applies the changes, creates a git branch,
-
   and opens a draft pull request (if `AGENT_GIT_APPLY_ENABLED=1`).
-
 - **Reject** (`approve: false`): Discards the proposal without making any changes.
 
-
-
 **Authentication**: Requires valid JWT token with `dev` role.
-
 **Rate Limited**: 30 requests per 60 seconds per IP.
-
 """,
-
     require_dev=True,
-
     tags=["Confirmation"],
-
     responses=CONFIRM_RESPONSES,
-
 )
-
 async def confirm(
-
     req: ConfirmRequest,
-
     request: Request,
-
     authorization: str | None = Header(default=None),
-
 ) -> ConfirmResponse:
-
     if not _rate_ok(_client_ip(request)):
-
         raise HTTPException(status_code=429, detail="Too many requests")
-
     # Role is already enforced as "dev" by the require_dev wrapper in
-
     # register_action(); verify_token() is called again here only to recover
-
     # the role string for audit logging (cheap: token was already validated
-
     # once this request, and verify_token does not mutate state).
-
     role = verify_token(authorization)
-
-
 
     config = {"configurable": {"thread_id": req.session_id}}
 
-
-
     audit(
-
         {"session_id": req.session_id, "role": role, "event": "confirm", "approved": req.approve}
-
     )
-
-
 
     if not req.approve:
-
         # Reject: drop the staged proposals and resume the graph to record the
-
         # human's decision without applying anything. The graph is compiled
-
         # with interrupt_before=["human_gate"], so the checkpoint is paused
-
         # just before that node; passing None as input resumes it from the
-
         # checkpoint rather than starting a new turn. Without this call the
-
         # session would stay parked at human_gate forever.
-
         _patchstore.clear(req.session_id)
-
         agent_graph.invoke(None, config=config)
-
         return ConfirmRejectedResponse(
-
             status="rejected",
-
             detail="Proposal discarded (not applied).",
-
             reply="Proposal discarded.",
-
         )
-
-
 
     # ---------- no proposals: fast path ---------- #
-
     proposals = _patchstore.get_proposals(req.session_id)
-
     if not proposals:
-
         # No patchable proposal staged (e.g. the agent only answered a query);
-
         # nothing to apply — report approved with an empty applied list.
-
         # Still resume so the checkpoint doesn't stall (see comment above).
-
         agent_graph.invoke(None, config=config)
-
         return ConfirmApprovedNoProposalsResponse(
-
             status="approved",
-
             reply="No pending proposals to apply.",
-
             applied=[],
-
         )
-
-
 
     # ---------- proposals: apply path ---------- #
-
     # Delegate to the apply-agent subservice over HTTP (compose internal).
-
     # This isolates git/gh/GPG mutations from the orchestrator process.
-
     apply_url = (
-
         (os.environ.get("APPLY_AGENT_URL") or "").strip()
-
         or "http://apply-agent:8083"
-
     ).rstrip("/")
-
     apply_body = {
-
         "session_id": req.session_id,
-
         "proposals": [
-
             {"path": p.path, "explanation": p.explanation, "patch": p.patch}
-
             for p in proposals
-
         ],
-
         "base": os.environ.get("AGENT_GIT_BASE", "main"),
-
     }
-
     try:
-
         apply_resp = requests.post(
-
             f"{apply_url}/apply", json=apply_body,
-
             timeout=int(os.environ.get("APPLY_AGENT_TIMEOUT_S", "180") or 180),
-
         )
-
         apply_resp.raise_for_status()
-
         apply_result = apply_resp.json()
-
     except requests.ConnectionError:
-
         agent_graph.invoke(None, config=config)
-
         return ConfirmErrorResponse(
-
             status="error",
-
             reply=f"apply-agent not reachable at {apply_url}",
-
             detail=f"apply-agent not reachable at {apply_url}",
-
         )
-
     except requests.Timeout:
-
         agent_graph.invoke(None, config=config)
-
         return ConfirmErrorResponse(
-
             status="error",
-
             reply="apply-agent timed out",
-
             detail="apply-agent timed out",
-
         )
-
     except requests.HTTPError as exc:
-
         try:
-
             detail = exc.response.json().get("detail", str(exc))
-
         except Exception:
-
             detail = str(exc)
-
         agent_graph.invoke(None, config=config)
-
         return ConfirmErrorResponse(
-
             status="error",
-
             reply=detail,
-
             detail=detail,
-
         )
-
     except Exception as exc:
-
         agent_graph.invoke(None, config=config)
-
         return ConfirmErrorResponse(
-
             status="error",
-
             reply=str(exc),
-
             detail=str(exc),
-
         )
-
-
 
     # Resume the paused checkpoint now that the apply outcome (success or
-
     # failure) is known, regardless of whether apply-agent reported "ok" —
-
     # an apply failure still needs to unstick the session for the next turn.
-
     agent_graph.invoke(None, config=config)
 
-
-
     if apply_result.get("status") == "ok":
-
         _patchstore.mark_applied(req.session_id, [p.id for p in proposals])
 
-
-
     audit(
-
         {
-
             "session_id": req.session_id,
-
             "role": role,
-
             "event": "apply",
-
             "status": apply_result.get("status"),
-
             "branch": apply_result.get("branch"),
-
             "pr_url": apply_result.get("pr_url"),
-
             "detail": apply_result.get("detail"),
-
         }
-
     )
-
-
 
     return ConfirmAppliedResponse(
-
         status=apply_result.get("status", "ok"),
-
         reply=apply_result.get("detail") or "Proposal processed.",
-
         applied_files=apply_result.get("applied_files"),
-
         branch=apply_result.get("branch"),
-
         pr_url=apply_result.get("pr_url"),
-
         detail=apply_result.get("detail"),
-
     )
 
 
-
-
-
 # =============================================================================
-
 # OpenAPI Spec Generation
-
 # =============================================================================
-
-
 
 def generate_openapi_spec() -> dict:
-
     """Generate the OpenAPI specification as a dictionary."""
-
     return app.openapi()
 
 
-
-
-
 def save_openapi_spec(filepath: str = "/root/kovanica-agent/openapi.json") -> None:
-
     """Save the OpenAPI specification to a JSON file."""
-
     import json
-
     spec = generate_openapi_spec()
-
     with open(filepath, "w") as f:
-
         json.dump(spec, f, indent=2)
-
     print(f"OpenAPI spec saved to {filepath}")
 
 
-
-
-
 if __name__ == "__main__":
-
     # Generate and save OpenAPI spec when run directly
-
     save_openapi_spec()
-

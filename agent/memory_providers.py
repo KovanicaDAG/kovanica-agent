@@ -102,6 +102,9 @@ class LocalMemoryProvider(MemoryProvider):
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.pending_file = self.memory_dir / "pending.jsonl"
         self.approved_file = self.memory_dir / "approved.jsonl"
+        # Create empty files if they don't exist
+        self.pending_file.touch(exist_ok=True)
+        self.approved_file.touch(exist_ok=True)
         self.approval_mode = config.get("memory_approval", True)
         return True
     

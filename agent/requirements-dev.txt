@@ -1,0 +1,2 @@
+bandit==1.7.*
+safety==2.3.*hvac==1.0.0
